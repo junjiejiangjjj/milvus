@@ -30,7 +30,8 @@ const (
 )
 
 const (
-	OpenAIProvider string = "openai"
+	OpenAIProvider      string = "openai"
+	AzureOpenAIProvider string = "azure_openai"
 )
 
 func getProvider(schema *schemapb.FunctionSchema) (string, error) {
@@ -44,13 +45,18 @@ func getProvider(schema *schemapb.FunctionSchema) (string, error) {
 	return "", fmt.Errorf("The provider parameter was not found in the function's parameters")
 }
 
-func NewTextEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*OpenAIEmbeddingFunction, error) {
+func NewTextEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (Runner, error) {
 	provider, err := getProvider(schema)
 	if err != nil {
 		return nil, err
 	}
-	if provider == OpenAIProvider {
+	switch provider {
+	case OpenAIProvider:
 		return NewOpenAIEmbeddingFunction(coll, schema)
+	case AzureOpenAIProvider:
+		return NewAzureOpenAIEmbeddingFunction(coll, schema)
+	default:
+		return nil, fmt.Errorf("Provider: [%s] not exist, only supports [%s, %s]", provider, OpenAIProvider, AzureOpenAIProvider)
 	}
-	return nil, fmt.Errorf("Provider: [%s] not exist, only supports [%s]", provider, OpenAIProvider)
+
 }

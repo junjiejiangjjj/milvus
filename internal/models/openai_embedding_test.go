@@ -30,21 +30,21 @@ import (
 
 func TestEmbeddingClientCheck(t *testing.T) {
 	{
-		c := OpenAIEmbeddingClient{"", "mock_uri"}
+		c := NewOpenAIEmbeddingClient("", "mock_uri")
 		err := c.Check()
 		assert.True(t, err != nil)
 		fmt.Println(err)
 	}
 
 	{
-		c := OpenAIEmbeddingClient{"mock_key", ""}
+		c := NewOpenAIEmbeddingClient("mock_key", "")
 		err := c.Check()
 		assert.True(t, err != nil)
 		fmt.Println(err)
 	}
 
 	{
-		c := OpenAIEmbeddingClient{"mock_key", "mock_uri"}
+		c := NewOpenAIEmbeddingClient("mock_key", "mock_uri")
 		err := c.Check()
 		assert.True(t, err == nil)
 	}
@@ -76,7 +76,7 @@ func TestEmbeddingOK(t *testing.T) {
 	url := ts.URL
 
 	{
-		c := OpenAIEmbeddingClient{"mock_key", url}
+		c := NewOpenAIEmbeddingClient("mock_key", url)
 		err := c.Check()
 		assert.True(t, err == nil)
 		ret, err := c.Embedding("text-embedding-3-small", []string{"sentence"}, 0, "", 0)
@@ -128,7 +128,7 @@ func TestEmbeddingRetry(t *testing.T) {
 	url := ts.URL
 
 	{
-		c := OpenAIEmbeddingClient{"mock_key", url}
+		c := NewOpenAIEmbeddingClient("mock_key", url)
 		err := c.Check()
 		assert.True(t, err == nil)
 		ret, err := c.Embedding("text-embedding-3-small", []string{"sentence"}, 0, "", 0)
@@ -154,7 +154,7 @@ func TestEmbeddingFailed(t *testing.T) {
 	url := ts.URL
 
 	{
-		c := OpenAIEmbeddingClient{"mock_key", url}
+		c := NewOpenAIEmbeddingClient("mock_key", url)
 		err := c.Check()
 		assert.True(t, err == nil)
 		_, err = c.Embedding("text-embedding-3-small", []string{"sentence"}, 0, "", 0)
@@ -175,7 +175,7 @@ func TestTimeout(t *testing.T) {
 	url := ts.URL
 
 	{
-		c := OpenAIEmbeddingClient{"mock_key", url}
+		c := NewOpenAIEmbeddingClient("mock_key", url)
 		err := c.Check()
 		assert.True(t, err == nil)
 		_, err = c.Embedding("text-embedding-3-small", []string{"sentence"}, 0, "", 1)

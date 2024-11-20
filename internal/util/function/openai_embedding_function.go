@@ -55,7 +55,7 @@ type OpenAIEmbeddingFunction struct {
 	FunctionBase
 	fieldDim int64
 
-	client        *models.OpenAIEmbeddingClient
+	client        models.OpenAIEmbeddingInterface
 	modelName     string
 	embedDimParam int64
 	user          string
@@ -66,20 +66,47 @@ func createOpenAIEmbeddingClient(apiKey string, url string) (*models.OpenAIEmbed
 		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("The apiKey configuration was not found in the environment variables")
+		return nil, fmt.Errorf("Missing credentials. Please pass `api_key`, or configure the OPENAI_API_KEY environment variable in the Milvus service.")
 	}
 
-	if url == "" {
-		url = os.Getenv("OPENAI_EMBEDDING_URL")
-	}
 	if url == "" {
 		url = "https://api.openai.com/v1/embeddings"
 	}
+	if url == "" {
+		return nil, fmt.Errorf("Must provide `url` arguments or configure the AZURE_OPENAI_ENDPOINT environment variable in the Milvus service")
+	}
+
 	c := models.NewOpenAIEmbeddingClient(apiKey, url)
-	return &c, nil
+	return c, nil
 }
 
-func NewOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*OpenAIEmbeddingFunction, error) {
+func createAzureOpenAIEmbeddingClient(apiKey string, url string) (*models.AzureOpenAIEmbeddingClient, error) {
+	if apiKey == "" {
+		apiKey = os.Getenv("AZURE_OPENAI_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("Missing credentials. Please pass `api_key`, or configure the AZURE_OPENAI_API_KEY environment variable in the Milvus service")
+	}
+
+	if url == "" {
+		url = os.Getenv("AZURE_OPENAI_ENDPOINT")
+	}
+	if url == "" {
+		return nil, fmt.Errorf("Must provide `url` arguments or configure the AZURE_OPENAI_ENDPOINT environment variable in the Milvus service")
+	}
+	c := models.NewAzureOpenAIEmbeddingClient(apiKey, url)
+	return c, nil
+}
+
+func checkModel(modelName string) error {
+	if modelName != TextEmbeddingAda002 && modelName != TextEmbedding3Small && modelName != TextEmbedding3Large {
+		return fmt.Errorf("Unsupported model: %s, only support [%s, %s, %s]",
+			modelName, TextEmbeddingAda002, TextEmbedding3Small, TextEmbedding3Large)
+	}
+	return nil
+}
+
+func newOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema, isAzure bool) (*OpenAIEmbeddingFunction, error) {
 	if len(schema.GetOutputFieldIds()) != 1 {
 		return nil, fmt.Errorf("OpenAIEmbedding function should only have one output field, but now is %d", len(schema.GetOutputFieldIds()))
 	}
@@ -125,9 +152,21 @@ func NewOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemap
 		}
 	}
 
-	c, err := createOpenAIEmbeddingClient(apiKey, url)
-	if err != nil {
-		return nil, err
+	var c models.OpenAIEmbeddingInterface
+	if !isAzure {
+		if err := checkModel(modelName); err != nil {
+			return nil, err
+		}
+
+		c, err = createOpenAIEmbeddingClient(apiKey, url)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		c, err = createAzureOpenAIEmbeddingClient(apiKey, url)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	runner := OpenAIEmbeddingFunction{
@@ -138,12 +177,15 @@ func NewOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemap
 		user:          user,
 		embedDimParam: dim,
 	}
-
-	if runner.modelName != TextEmbeddingAda002 && runner.modelName != TextEmbedding3Small && runner.modelName != TextEmbedding3Large {
-		return nil, fmt.Errorf("Unsupported model: %s, only support [%s, %s, %s]",
-			runner.modelName, TextEmbeddingAda002, TextEmbedding3Small, TextEmbedding3Large)
-	}
 	return &runner, nil
+}
+
+func NewOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*OpenAIEmbeddingFunction, error) {
+	return newOpenAIEmbeddingFunction(coll, schema, false)
+}
+
+func NewAzureOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*OpenAIEmbeddingFunction, error) {
+	return newOpenAIEmbeddingFunction(coll, schema, true)
 }
 
 func (runner *OpenAIEmbeddingFunction) MaxBatch() int {
