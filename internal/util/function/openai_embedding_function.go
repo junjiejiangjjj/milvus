@@ -26,7 +26,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-	"github.com/milvus-io/milvus/internal/models"
+	"github.com/milvus-io/milvus/internal/models/openai"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
@@ -55,13 +55,13 @@ type OpenAIEmbeddingFunction struct {
 	FunctionBase
 	fieldDim int64
 
-	client        models.OpenAIEmbeddingInterface
+	client        openai.OpenAIEmbeddingInterface
 	modelName     string
 	embedDimParam int64
 	user          string
 }
 
-func createOpenAIEmbeddingClient(apiKey string, url string) (*models.OpenAIEmbeddingClient, error) {
+func createOpenAIEmbeddingClient(apiKey string, url string) (*openai.OpenAIEmbeddingClient, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("OPENAI_API_KEY")
 	}
@@ -76,11 +76,11 @@ func createOpenAIEmbeddingClient(apiKey string, url string) (*models.OpenAIEmbed
 		return nil, fmt.Errorf("Must provide `url` arguments or configure the AZURE_OPENAI_ENDPOINT environment variable in the Milvus service")
 	}
 
-	c := models.NewOpenAIEmbeddingClient(apiKey, url)
+	c := openai.NewOpenAIEmbeddingClient(apiKey, url)
 	return c, nil
 }
 
-func createAzureOpenAIEmbeddingClient(apiKey string, url string) (*models.AzureOpenAIEmbeddingClient, error) {
+func createAzureOpenAIEmbeddingClient(apiKey string, url string) (*openai.AzureOpenAIEmbeddingClient, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("AZURE_OPENAI_API_KEY")
 	}
@@ -94,7 +94,7 @@ func createAzureOpenAIEmbeddingClient(apiKey string, url string) (*models.AzureO
 	if url == "" {
 		return nil, fmt.Errorf("Must provide `url` arguments or configure the AZURE_OPENAI_ENDPOINT environment variable in the Milvus service")
 	}
-	c := models.NewAzureOpenAIEmbeddingClient(apiKey, url)
+	c := openai.NewAzureOpenAIEmbeddingClient(apiKey, url)
 	return c, nil
 }
 
@@ -152,7 +152,7 @@ func newOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemap
 		}
 	}
 
-	var c models.OpenAIEmbeddingInterface
+	var c openai.OpenAIEmbeddingInterface
 	if !isAzure {
 		if err := checkModel(modelName); err != nil {
 			return nil, err

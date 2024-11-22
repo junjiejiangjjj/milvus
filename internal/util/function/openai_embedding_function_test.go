@@ -30,7 +30,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 
-	"github.com/milvus-io/milvus/internal/models"
+	"github.com/milvus-io/milvus/internal/models/openai"
 )
 
 func TestOpenAIEmbeddingFunction(t *testing.T) {
@@ -105,24 +105,24 @@ func createRunner(url string, schema *schemapb.CollectionSchema) (*OpenAIEmbeddi
 
 func (s *OpenAIEmbeddingFunctionSuite) TestEmbedding() {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req models.EmbeddingRequest
+		var req openai.EmbeddingRequest
 		body, _ := io.ReadAll(r.Body)
 		defer r.Body.Close()
 		json.Unmarshal(body, &req)
 
-		var res models.EmbeddingResponse
+		var res openai.EmbeddingResponse
 		res.Object = "list"
 		res.Model = "text-embedding-3-small"
 		embs := createEmbedding(req.Input, 4)
 		for i := 0; i < len(req.Input); i++ {
-			res.Data = append(res.Data, models.EmbeddingData{
+			res.Data = append(res.Data, openai.EmbeddingData{
 				Object:    "embedding",
 				Embedding: embs[i],
 				Index:     i,
 			})
 		}
 
-		res.Usage = models.Usage{
+		res.Usage = openai.Usage{
 			PromptTokens: 1,
 			TotalTokens:  100,
 		}
@@ -152,21 +152,21 @@ func (s *OpenAIEmbeddingFunctionSuite) TestEmbedding() {
 
 func (s *OpenAIEmbeddingFunctionSuite) TestEmbeddingDimNotMatch() {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var res models.EmbeddingResponse
+		var res openai.EmbeddingResponse
 		res.Object = "list"
 		res.Model = "text-embedding-3-small"
-		res.Data = append(res.Data, models.EmbeddingData{
+		res.Data = append(res.Data, openai.EmbeddingData{
 			Object:    "embedding",
 			Embedding: []float32{1.0, 1.0, 1.0, 1.0},
 			Index:     0,
 		})
 
-		res.Data = append(res.Data, models.EmbeddingData{
+		res.Data = append(res.Data, openai.EmbeddingData{
 			Object:    "embedding",
 			Embedding: []float32{1.0, 1.0},
 			Index:     1,
 		})
-		res.Usage = models.Usage{
+		res.Usage = openai.Usage{
 			PromptTokens: 1,
 			TotalTokens:  100,
 		}
@@ -187,15 +187,15 @@ func (s *OpenAIEmbeddingFunctionSuite) TestEmbeddingDimNotMatch() {
 
 func (s *OpenAIEmbeddingFunctionSuite) TestEmbeddingNubmerNotMatch() {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var res models.EmbeddingResponse
+		var res openai.EmbeddingResponse
 		res.Object = "list"
 		res.Model = "text-embedding-3-small"
-		res.Data = append(res.Data, models.EmbeddingData{
+		res.Data = append(res.Data, openai.EmbeddingData{
 			Object:    "embedding",
 			Embedding: []float32{1.0, 1.0, 1.0, 1.0},
 			Index:     0,
 		})
-		res.Usage = models.Usage{
+		res.Usage = openai.Usage{
 			PromptTokens: 1,
 			TotalTokens:  100,
 		}

@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package openai
 
 import (
 	"encoding/json"
@@ -58,6 +58,11 @@ func TestEmbeddingOK(t *testing.T) {
 		{
 			Object:    "embedding",
 			Embedding: []float32{1.1, 2.2, 3.3, 4.4},
+			Index:     1,
+		},
+		{
+			Object:    "embedding",
+			Embedding: []float32{1.1, 2.2, 3.3, 4.4},
 			Index:     0,
 		},
 	}
@@ -81,7 +86,8 @@ func TestEmbeddingOK(t *testing.T) {
 		assert.True(t, err == nil)
 		ret, err := c.Embedding("text-embedding-3-small", []string{"sentence"}, 0, "", 0)
 		assert.True(t, err == nil)
-		assert.Equal(t, ret, &res)
+		assert.Equal(t, ret.Data[0].Index, 0)
+		assert.Equal(t, ret.Data[1].Index, 1)
 	}
 }
 

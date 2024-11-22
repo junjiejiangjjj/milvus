@@ -14,17 +14,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package models
+package openai
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"sort"
 	"time"
+
+	"github.com/milvus-io/milvus/internal/models"
 )
 
 type EmbeddingRequest struct {
@@ -119,42 +120,6 @@ func (c *openAIBase) Check() error {
 	return nil
 }
 
-func (c *openAIBase) send(client *http.Client, req *http.Request, res *EmbeddingResponse) error {
-	// call openai
-	resp, err := client.Do(req)
-
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf(string(body))
-	}
-
-	err = json.Unmarshal(body, &res)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *openAIBase) sendWithRetry(client *http.Client, req *http.Request, res *EmbeddingResponse, maxRetries int) error {
-	var err error
-	for i := 0; i < maxRetries; i++ {
-		err = c.send(client, req, res)
-		if err == nil {
-			return nil
-		}
-	}
-	return err
-}
-
 func (c *openAIBase) genReq(modelName string, texts []string, dim int, user string) *EmbeddingRequest {
 	var r EmbeddingRequest
 	r.Model = modelName
@@ -201,8 +166,12 @@ func (c *OpenAIEmbeddingClient) Embedding(modelName string, texts []string, dim 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	body, err := models.RetrySend(client, req, 3)
+	if err != nil {
+		return nil, err
+	}
 	var res EmbeddingResponse
-	err = c.sendWithRetry(client, req, &res, 3)
+	err = json.Unmarshal(body, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -235,9 +204,7 @@ func (c *AzureOpenAIEmbeddingClient) Embedding(modelName string, texts []string,
 	if timeoutSec <= 0 {
 		timeoutSec = 30
 	}
-	client := &http.Client{
-		Timeout: timeoutSec * time.Second,
-	}
+
 	base, err := url.Parse(c.url)
 	if err != nil {
 		return nil, err
@@ -247,15 +214,23 @@ func (c *AzureOpenAIEmbeddingClient) Embedding(modelName string, texts []string,
 	params := url.Values{}
 	params.Add("api-version", c.apiVersion)
 	base.RawQuery = params.Encode()
-	req, err := http.NewRequest("POST", base.String(), bytes.NewBuffer(data))
+
+	client := &http.Client{
+		Timeout: timeoutSec * time.Second,
+	}
+	req, err := http.NewRequest("POST", c.url, bytes.NewBuffer(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	body, err := models.RetrySend(client, req, 3)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("api-key", c.apiKey)
 	var res EmbeddingResponse
-	err = c.sendWithRetry(client, req, &res, 3)
+	err = json.Unmarshal(body, &res)
 	if err != nil {
 		return nil, err
 	}

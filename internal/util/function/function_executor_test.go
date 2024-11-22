@@ -31,7 +31,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/msgpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-	"github.com/milvus-io/milvus/internal/models"
+	"github.com/milvus-io/milvus/internal/models/openai"
 	"github.com/milvus-io/milvus/pkg/mq/msgstream"
 )
 
@@ -148,23 +148,23 @@ func (s *FunctionExecutorSuite) TestExecutor() {
 
 func (s *FunctionExecutorSuite) TestErrorEmbedding() {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req models.EmbeddingRequest
+		var req openai.EmbeddingRequest
 		body, _ := io.ReadAll(r.Body)
 		defer r.Body.Close()
 		json.Unmarshal(body, &req)
 
-		var res models.EmbeddingResponse
+		var res openai.EmbeddingResponse
 		res.Object = "list"
 		res.Model = "text-embedding-3-small"
 		for i := 0; i < len(req.Input); i++ {
-			res.Data = append(res.Data, models.EmbeddingData{
+			res.Data = append(res.Data, openai.EmbeddingData{
 				Object:    "embedding",
 				Embedding: []float32{},
 				Index:     i,
 			})
 		}
 
-		res.Usage = models.Usage{
+		res.Usage = openai.Usage{
 			PromptTokens: 1,
 			TotalTokens:  100,
 		}
