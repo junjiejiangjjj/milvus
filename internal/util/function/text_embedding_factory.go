@@ -32,6 +32,7 @@ const (
 const (
 	OpenAIProvider      string = "openai"
 	AzureOpenAIProvider string = "azure_openai"
+	AliDashScope        string = "dashscope"
 )
 
 func getProvider(schema *schemapb.FunctionSchema) (string, error) {
@@ -55,8 +56,10 @@ func NewTextEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.
 		return NewOpenAIEmbeddingFunction(coll, schema)
 	case AzureOpenAIProvider:
 		return NewAzureOpenAIEmbeddingFunction(coll, schema)
+	case AliDashScope:
+		return NewAliDashScopeEmbeddingFunction(coll, schema)
 	default:
-		return nil, fmt.Errorf("Provider: [%s] not exist, only supports [%s, %s]", provider, OpenAIProvider, AzureOpenAIProvider)
+		return nil, fmt.Errorf("Provider: [%s] not exist, only supports [%s, %s, %s]", provider, OpenAIProvider, AzureOpenAIProvider, AliDashScope)
 	}
 
 }

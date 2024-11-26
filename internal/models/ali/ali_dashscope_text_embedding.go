@@ -20,12 +20,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/models"
+	"github.com/milvus-io/milvus/internal/models/utils"
 )
 
 type Input struct {
@@ -116,38 +115,6 @@ func (c *AliDashScopeEmbedding) Check() error {
 	return nil
 }
 
-func (c *AliDashScopeEmbedding) send(client *http.Client, req *http.Request, res *EmbeddingResponse) error {
-	// call openai
-	resp, err := client.Do(req)
-
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf(string(body))
-	}
-
-	return nil
-}
-
-func (c *AliDashScopeEmbedding) sendWithRetry(client *http.Client, req *http.Request, res *EmbeddingResponse, maxRetries int) error {
-	var err error
-	for i := 0; i < maxRetries; i++ {
-		err = c.send(client, req, res)
-		if err == nil {
-			return nil
-		}
-	}
-	return err
-}
-
 func (c *AliDashScopeEmbedding) Embedding(modelName string, texts []string, dim int, text_type string, output_type string, timeoutSec time.Duration) (*EmbeddingResponse, error) {
 	var r EmbeddingRequest
 	r.Model = modelName
@@ -173,7 +140,7 @@ func (c *AliDashScopeEmbedding) Embedding(modelName string, texts []string, dim 
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
-	body, err := models.RetrySend(client, req, 3)
+	body, err := utils.RetrySend(client, req, 3)
 	if err != nil {
 		return nil, err
 	}

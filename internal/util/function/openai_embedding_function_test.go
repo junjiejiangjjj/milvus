@@ -96,9 +96,9 @@ func createRunner(url string, schema *schemapb.CollectionSchema) (*OpenAIEmbeddi
 		InputFieldIds:  []int64{101},
 		OutputFieldIds: []int64{102},
 		Params: []*commonpb.KeyValuePair{
-			{Key: ModelNameParamKey, Value: "text-embedding-ada-002"},
-			{Key: OpenaiApiKeyParamKey, Value: "mock"},
-			{Key: OpenaiEmbeddingUrlParamKey, Value: url},
+			{Key: modelNameParamKey, Value: "text-embedding-ada-002"},
+			{Key: apiKeyParamKey, Value: "mock"},
+			{Key: embeddingUrlParamKey, Value: url},
 		},
 	})
 }
@@ -236,10 +236,10 @@ func (s *OpenAIEmbeddingFunctionSuite) TestRunnerParamsErr() {
 			InputFieldIds:  []int64{101},
 			OutputFieldIds: []int64{102},
 			Params: []*commonpb.KeyValuePair{
-				{Key: ModelNameParamKey, Value: "text-embedding-ada-002"},
-				{Key: DimParamKey, Value: "4"},
-				{Key: OpenaiApiKeyParamKey, Value: "mock"},
-				{Key: OpenaiEmbeddingUrlParamKey, Value: "mock"},
+				{Key: modelNameParamKey, Value: "text-embedding-ada-002"},
+				{Key: dimParamKey, Value: "4"},
+				{Key: apiKeyParamKey, Value: "mock"},
+				{Key: embeddingUrlParamKey, Value: "mock"},
 			},
 		})
 		s.Error(err)
@@ -268,10 +268,10 @@ func (s *OpenAIEmbeddingFunctionSuite) TestRunnerParamsErr() {
 			InputFieldIds:  []int64{101},
 			OutputFieldIds: []int64{102, 103},
 			Params: []*commonpb.KeyValuePair{
-				{Key: ModelNameParamKey, Value: "text-embedding-ada-002"},
-				{Key: DimParamKey, Value: "4"},
-				{Key: OpenaiApiKeyParamKey, Value: "mock"},
-				{Key: OpenaiEmbeddingUrlParamKey, Value: "mock"},
+				{Key: modelNameParamKey, Value: "text-embedding-ada-002"},
+				{Key: dimParamKey, Value: "4"},
+				{Key: apiKeyParamKey, Value: "mock"},
+				{Key: embeddingUrlParamKey, Value: "mock"},
 			},
 		})
 		s.Error(err)
@@ -285,10 +285,10 @@ func (s *OpenAIEmbeddingFunctionSuite) TestRunnerParamsErr() {
 			InputFieldIds:  []int64{101},
 			OutputFieldIds: []int64{103},
 			Params: []*commonpb.KeyValuePair{
-				{Key: ModelNameParamKey, Value: "text-embedding-ada-002"},
-				{Key: DimParamKey, Value: "4"},
-				{Key: OpenaiApiKeyParamKey, Value: "mock"},
-				{Key: OpenaiEmbeddingUrlParamKey, Value: "mock"},
+				{Key: modelNameParamKey, Value: "text-embedding-ada-002"},
+				{Key: dimParamKey, Value: "4"},
+				{Key: apiKeyParamKey, Value: "mock"},
+				{Key: embeddingUrlParamKey, Value: "mock"},
 			},
 		})
 		s.Error(err)
@@ -302,10 +302,10 @@ func (s *OpenAIEmbeddingFunctionSuite) TestRunnerParamsErr() {
 			InputFieldIds:  []int64{101},
 			OutputFieldIds: []int64{102},
 			Params: []*commonpb.KeyValuePair{
-				{Key: ModelNameParamKey, Value: "text-embedding-ada-004"},
-				{Key: DimParamKey, Value: "4"},
-				{Key: OpenaiApiKeyParamKey, Value: "mock"},
-				{Key: OpenaiEmbeddingUrlParamKey, Value: "mock"},
+				{Key: modelNameParamKey, Value: "text-embedding-ada-004"},
+				{Key: dimParamKey, Value: "4"},
+				{Key: apiKeyParamKey, Value: "mock"},
+				{Key: embeddingUrlParamKey, Value: "mock"},
 			},
 		})
 		s.Error(err)
@@ -319,7 +319,7 @@ func (s *OpenAIEmbeddingFunctionSuite) TestRunnerParamsErr() {
 			InputFieldIds:  []int64{101},
 			OutputFieldIds: []int64{102},
 			Params: []*commonpb.KeyValuePair{
-				{Key: ModelNameParamKey, Value: "text-embedding-ada-003"},
+				{Key: modelNameParamKey, Value: "text-embedding-ada-003"},
 			},
 		})
 		s.Error(err)

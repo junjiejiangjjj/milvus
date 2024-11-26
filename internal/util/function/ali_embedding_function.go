@@ -27,63 +27,44 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
-	"github.com/milvus-io/milvus/internal/models/openai"
+	"github.com/milvus-io/milvus/internal/models/ali"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/util/funcutil"
 	"github.com/milvus-io/milvus/pkg/util/typeutil"
 )
 
-type OpenAIEmbeddingFunction struct {
+type AliEmbeddingFunction struct {
 	FunctionBase
 	fieldDim int64
 
-	client        openai.OpenAIEmbeddingInterface
+	client        *ali.AliDashScopeEmbedding
 	modelName     string
 	embedDimParam int64
-	user          string
 
 	maxBatch   int
 	timeoutSec int
 }
 
-func createOpenAIEmbeddingClient(apiKey string, url string) (*openai.OpenAIEmbeddingClient, error) {
+func createAliEmbeddingClient(apiKey string, url string) (*ali.AliDashScopeEmbedding, error) {
 	if apiKey == "" {
-		apiKey = os.Getenv("OPENAI_API_KEY")
+		apiKey = os.Getenv("DASHSCOPE_API_KEY")
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("Missing credentials. Please pass `api_key`, or configure the OPENAI_API_KEY environment variable in the Milvus service.")
+		return nil, fmt.Errorf("Missing credentials. Please pass `api_key`, or configure the DASHSCOPE_API_KEY environment variable in the Milvus service.")
 	}
 
 	if url == "" {
-		url = "https://api.openai.com/v1/embeddings"
+		url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
 	}
 	if url == "" {
-		return nil, fmt.Errorf("Must provide `url` arguments or configure the OPENAI_ENDPOINT environment variable in the Milvus service")
+		return nil, fmt.Errorf("Must provide `url` arguments or configure the DASHSCOPE_ENDPOINT environment variable in the Milvus service")
 	}
 
-	c := openai.NewOpenAIEmbeddingClient(apiKey, url)
+	c := ali.NewAliDashScopeEmbeddingClient(apiKey, url)
 	return c, nil
 }
 
-func createAzureOpenAIEmbeddingClient(apiKey string, url string) (*openai.AzureOpenAIEmbeddingClient, error) {
-	if apiKey == "" {
-		apiKey = os.Getenv("AZURE_OPENAI_API_KEY")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("Missing credentials. Please pass `api_key`, or configure the AZURE_OPENAI_API_KEY environment variable in the Milvus service")
-	}
-
-	if url == "" {
-		url = os.Getenv("AZURE_OPENAI_ENDPOINT")
-	}
-	if url == "" {
-		return nil, fmt.Errorf("Must provide `url` arguments or configure the AZURE_OPENAI_ENDPOINT environment variable in the Milvus service")
-	}
-	c := openai.NewAzureOpenAIEmbeddingClient(apiKey, url)
-	return c, nil
-}
-
-func newOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema, isAzure bool) (*OpenAIEmbeddingFunction, error) {
+func NewAliDashScopeEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*AliEmbeddingFunction, error) {
 	if len(schema.GetOutputFieldIds()) != 1 {
 		return nil, fmt.Errorf("OpenAIEmbedding function should only have one output field, but now is %d", len(schema.GetOutputFieldIds()))
 	}
@@ -103,7 +84,7 @@ func newOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemap
 	if err != nil {
 		return nil, err
 	}
-	var apiKey, url, modelName, user string
+	var apiKey, url, modelName string
 	var dim int64
 
 	for _, param := range schema.Params {
@@ -119,8 +100,6 @@ func newOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemap
 			if dim != 0 && dim != fieldDim {
 				return nil, fmt.Errorf("Field %s's dim is [%d], but embeding's dim is [%d]", schema.Name, fieldDim, dim)
 			}
-		case userParamKey:
-			user = param.Value
 		case apiKeyParamKey:
 			apiKey = param.Value
 		case embeddingUrlParamKey:
@@ -129,53 +108,34 @@ func newOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemap
 		}
 	}
 
-	var c openai.OpenAIEmbeddingInterface
-	if !isAzure {
-		if modelName != TextEmbeddingAda002 && modelName != TextEmbedding3Small && modelName != TextEmbedding3Large {
-			return nil, fmt.Errorf("Unsupported model: %s, only support [%s, %s, %s]",
-				modelName, TextEmbeddingAda002, TextEmbedding3Small, TextEmbedding3Large)
-		}
-
-		c, err = createOpenAIEmbeddingClient(apiKey, url)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		c, err = createAzureOpenAIEmbeddingClient(apiKey, url)
-		if err != nil {
-			return nil, err
-		}
+	if modelName != TextEmbeddingV1 && modelName != TextEmbeddingV2 && modelName != TextEmbeddingV3 {
+		return nil, fmt.Errorf("Unsupported model: %s, only support [%s, %s, %s]",
+			modelName, TextEmbeddingV1, TextEmbeddingV2, TextEmbeddingV3)
 	}
-
-	runner := OpenAIEmbeddingFunction{
+	c, err := createAliEmbeddingClient(apiKey, url)
+	if err != nil {
+		return nil, err
+	}
+	runner := AliEmbeddingFunction{
 		FunctionBase:  *base,
 		client:        c,
 		fieldDim:      fieldDim,
 		modelName:     modelName,
-		user:          user,
 		embedDimParam: dim,
-		maxBatch:      128,
+		maxBatch:      25,
 		timeoutSec:    30,
 	}
 	return &runner, nil
 }
 
-func NewOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*OpenAIEmbeddingFunction, error) {
-	return newOpenAIEmbeddingFunction(coll, schema, false)
-}
-
-func NewAzureOpenAIEmbeddingFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSchema) (*OpenAIEmbeddingFunction, error) {
-	return newOpenAIEmbeddingFunction(coll, schema, true)
-}
-
-func (runner *OpenAIEmbeddingFunction) MaxBatch() int {
+func (runner *AliEmbeddingFunction) MaxBatch() int {
 	return 5 * runner.maxBatch
 }
 
-func (runner *OpenAIEmbeddingFunction) callEmbedding(texts []string, batchLimit bool) ([][]float32, error) {
+func (runner *AliEmbeddingFunction) callEmbedding(texts []string, batchLimit bool) ([][]float32, error) {
 	numRows := len(texts)
 	if batchLimit && numRows > runner.MaxBatch() {
-		return nil, fmt.Errorf("OpenAI embedding supports up to [%d] pieces of data at a time, got [%d]", runner.MaxBatch(), numRows)
+		return nil, fmt.Errorf("Ali text embedding supports up to [%d] pieces of data at a time, got [%d]", runner.MaxBatch(), numRows)
 	}
 
 	data := make([][]float32, 0, numRows)
@@ -184,14 +144,14 @@ func (runner *OpenAIEmbeddingFunction) callEmbedding(texts []string, batchLimit 
 		if end > numRows {
 			end = numRows
 		}
-		resp, err := runner.client.Embedding(runner.modelName, texts[i:end], int(runner.embedDimParam), runner.user, time.Duration(runner.timeoutSec))
+		resp, err := runner.client.Embedding(runner.modelName, texts[i:end], int(runner.embedDimParam), "query", "dense", time.Duration(runner.timeoutSec))
 		if err != nil {
 			return nil, err
 		}
-		if end-i != len(resp.Data) {
-			return nil, fmt.Errorf("The texts number is [%d], but got embedding number [%d]", end-i, len(resp.Data))
+		if end-i != len(resp.Output.Embeddings) {
+			return nil, fmt.Errorf("The texts number is [%d], but got embedding number [%d]", end-i, len(resp.Output.Embeddings))
 		}
-		for _, item := range resp.Data {
+		for _, item := range resp.Output.Embeddings {
 			if len(item.Embedding) != int(runner.fieldDim) {
 				return nil, fmt.Errorf("The required embedding dim for field [%s] is [%d], but the embedding obtained from the model is [%d]",
 					runner.outputFields[0].Name, runner.fieldDim, len(item.Embedding))
@@ -202,9 +162,9 @@ func (runner *OpenAIEmbeddingFunction) callEmbedding(texts []string, batchLimit 
 	return data, nil
 }
 
-func (runner *OpenAIEmbeddingFunction) ProcessInsert(inputs []*schemapb.FieldData) ([]*schemapb.FieldData, error) {
+func (runner *AliEmbeddingFunction) ProcessInsert(inputs []*schemapb.FieldData) ([]*schemapb.FieldData, error) {
 	if len(inputs) != 1 {
-		return nil, fmt.Errorf("OpenAIEmbedding function only receives one input, bug got [%d]", len(inputs))
+		return nil, fmt.Errorf("Ali text embedding function only receives one input, bug got [%d]", len(inputs))
 	}
 
 	if inputs[0].Type != schemapb.DataType_VarChar {
@@ -243,7 +203,7 @@ func (runner *OpenAIEmbeddingFunction) ProcessInsert(inputs []*schemapb.FieldDat
 	return []*schemapb.FieldData{&outputField}, nil
 }
 
-func (runner *OpenAIEmbeddingFunction) ProcessSearch(placeholderGroup *commonpb.PlaceholderGroup) (*commonpb.PlaceholderGroup, error) {
+func (runner *AliEmbeddingFunction) ProcessSearch(placeholderGroup *commonpb.PlaceholderGroup) (*commonpb.PlaceholderGroup, error) {
 	texts := funcutil.GetVarCharFromPlaceholder(placeholderGroup.Placeholders[0]) // Already checked externally
 	embds, err := runner.callEmbedding(texts, true)
 	if err != nil {
@@ -252,7 +212,7 @@ func (runner *OpenAIEmbeddingFunction) ProcessSearch(placeholderGroup *commonpb.
 	return funcutil.Float32VectorsToPlaceholderGroup(embds), nil
 }
 
-func (runner *OpenAIEmbeddingFunction) ProcessBulkInsert(inputs []storage.FieldData) (map[storage.FieldID]storage.FieldData, error) {
+func (runner *AliEmbeddingFunction) ProcessBulkInsert(inputs []storage.FieldData) (map[storage.FieldID]storage.FieldData, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("OpenAIEmbedding function only receives one input, bug got [%d]", len(inputs))
 	}

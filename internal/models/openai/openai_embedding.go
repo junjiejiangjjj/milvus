@@ -25,7 +25,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/milvus-io/milvus/internal/models"
+	"github.com/milvus-io/milvus/internal/models/utils"
 )
 
 type EmbeddingRequest struct {
@@ -166,7 +166,7 @@ func (c *OpenAIEmbeddingClient) Embedding(modelName string, texts []string, dim 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
-	body, err := models.RetrySend(client, req, 3)
+	body, err := utils.RetrySend(client, req, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +224,7 @@ func (c *AzureOpenAIEmbeddingClient) Embedding(modelName string, texts []string,
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
-	body, err := models.RetrySend(client, req, 3)
+	body, err := utils.RetrySend(client, req, 3)
 	if err != nil {
 		return nil, err
 	}
