@@ -332,7 +332,7 @@ func TestUpsertTask(t *testing.T) {
 }
 
 func TestUpsertTask_Function(t *testing.T) {
-	ts := function.CreateEmbeddingServer()
+	ts := function.CreateOpenAIEmbeddingServer()
 	defer ts.Close()
 	data := []*schemapb.FieldData{}
 	f1 := schemapb.FieldData{

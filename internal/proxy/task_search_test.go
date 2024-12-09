@@ -359,7 +359,7 @@ func TestSearchTask_PreExecute(t *testing.T) {
 }
 
 func TestSearchTask_WithFunctions(t *testing.T) {
-	ts := function.CreateEmbeddingServer()
+	ts := function.CreateOpenAIEmbeddingServer()
 	defer ts.Close()
 	collectionName := "TestInsertTask_function"
 	schema := &schemapb.CollectionSchema{

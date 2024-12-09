@@ -314,7 +314,7 @@ func TestMaxInsertSize(t *testing.T) {
 }
 
 func TestInsertTask_Function(t *testing.T) {
-	ts := function.CreateEmbeddingServer()
+	ts := function.CreateOpenAIEmbeddingServer()
 	defer ts.Close()
 	data := []*schemapb.FieldData{}
 	f := schemapb.FieldData{
