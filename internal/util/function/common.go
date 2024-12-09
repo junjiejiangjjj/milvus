@@ -44,3 +44,13 @@ const (
 const (
 	userParamKey string = "user"
 )
+
+// bedrock emebdding
+
+const (
+	BedRockTitanTextEmbeddingsV2 string = "amazon.titan-embed-text-v2:0"
+	awsAccessKeyIdParamKey       string = "aws_access_key_id"
+	awsSecretAccessKeyParamKey   string = "aws_secret_access_key"
+	regionParamKey               string = "regin"
+	normalizeParamKey            string = "normalize"
+)
