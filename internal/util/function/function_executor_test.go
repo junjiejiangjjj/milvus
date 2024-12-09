@@ -136,7 +136,7 @@ func (s *FunctionExecutorSuite) createEmbedding(texts []string, dim int) [][]flo
 }
 
 func (s *FunctionExecutorSuite) TestExecutor() {
-	ts := CreateEmbeddingServer()
+	ts := CreateOpenAIEmbeddingServer()
 	defer ts.Close()
 	schema := s.creataSchema(ts.URL)
 	exec, err := NewFunctionExecutor(schema)
