@@ -41,6 +41,7 @@ const (
 	voyageAIProvider     string = "voyageai"
 	cohereProvider       string = "cohere"
 	siliconflowProvider  string = "siliconflow"
+	teiProvider          string = "tei"
 )
 
 // Text embedding for retrieval task
@@ -106,8 +107,10 @@ func NewTextEmbeddingFunction(coll *schemapb.CollectionSchema, functionSchema *s
 		embP, newProviderErr = NewCohereEmbeddingProvider(base.outputFields[0], functionSchema)
 	case siliconflowProvider:
 		embP, newProviderErr = NewSiliconflowEmbeddingProvider(base.outputFields[0], functionSchema)
+	case teiProvider:
+		embP, newProviderErr = NewTEIEmbeddingProvider(base.outputFields[0], functionSchema)
 	default:
-		return nil, fmt.Errorf("Unsupported text embedding service provider: [%s] , list of supported [%s, %s, %s, %s, %s, %s, %s]", provider, openAIProvider, azureOpenAIProvider, aliDashScopeProvider, bedrockProvider, vertexAIProvider, voyageAIProvider, cohereProvider)
+		return nil, fmt.Errorf("Unsupported text embedding service provider: [%s] , list of supported [%s, %s, %s, %s, %s, %s, %s, %s]", provider, openAIProvider, azureOpenAIProvider, aliDashScopeProvider, bedrockProvider, vertexAIProvider, voyageAIProvider, cohereProvider, teiProvider)
 	}
 
 	if newProviderErr != nil {

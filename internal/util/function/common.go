@@ -36,6 +36,7 @@ const (
 	dimParamKey          string = "dim"
 	embeddingURLParamKey string = "url"
 	apiKeyParamKey       string = "api_key"
+	truncateParamKey     string = "truncate"
 )
 
 // ali text embedding
@@ -112,8 +113,6 @@ const (
 	embedEnglishLightV20      string = "embed-english-light-v2.0"
 	embedMultilingualV20      string = "embed-multilingual-v2.0"
 
-	truncateParamKey string = "truncate"
-
 	cohereAIAKEnvStr string = "MILVUSAI_COHERE_API_KEY"
 )
 
@@ -127,6 +126,18 @@ const (
 	proBAAIBgeM3                    string = "Pro/BAAI/bge-m3 "
 
 	siliconflowAKEnvStr string = "MILVUSAI_SILICONFLOW_API_KEY"
+)
+
+// TEI
+
+const (
+	ingestionPromptParamKey     string = "ingestion_prompt"
+	searchPromptParamKey        string = "search_prompt"
+	maxClientBatchSizeParamKey  string = "max_client_batch_size"
+	truncationDirectionParamKey string = "truncation_direction"
+	endpointParamKey            string = "endpoint"
+
+	enableTeiEnvStr string = "MILVUSAI_ENABLE_TEI"
 )
 
 func parseAndCheckFieldDim(dimStr string, fieldDim int64, fieldName string) (int64, error) {
