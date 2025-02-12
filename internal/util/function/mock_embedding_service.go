@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/util/function/models/cohere"
 	"github.com/milvus-io/milvus/internal/util/function/models/openai"
 	"github.com/milvus-io/milvus/internal/util/function/models/siliconflow"
+	"github.com/milvus-io/milvus/internal/util/function/models/tei"
 	"github.com/milvus-io/milvus/internal/util/function/models/vertexai"
 	"github.com/milvus-io/milvus/internal/util/function/models/voyageai"
 )
@@ -206,6 +207,20 @@ func CreateCohereEmbeddingServer() *httptest.Server {
 		res.Embeddings.Float = embs
 		w.WriteHeader(http.StatusOK)
 		data, _ := json.Marshal(res)
+		w.Write(data)
+	}))
+	return ts
+}
+
+func CreateTEIEmbeddingServer(dim int) *httptest.Server {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req tei.EmbeddingRequest
+		body, _ := io.ReadAll(r.Body)
+		defer r.Body.Close()
+		json.Unmarshal(body, &req)
+		embs := mockEmbedding(req.Inputs, dim)
+		w.WriteHeader(http.StatusOK)
+		data, _ := json.Marshal(embs)
 		w.Write(data)
 	}))
 	return ts
