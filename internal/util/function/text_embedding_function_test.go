@@ -130,12 +130,12 @@ func (s *TextEmbeddingFunctionSuite) TestProcessInsert() {
 			s.NoError(err2)
 			s.Equal(1, len(ret))
 			s.Equal(int64(4), ret[0].GetVectors().Dim)
-			s.Equal([]float32{0.0, 0.1, 0.2, 0.3}, ret[0].GetVectors().GetFloatVector().Data)
+			s.Equal([]float32{0.0, 1.0, 2.0, 3.0}, ret[0].GetVectors().GetFloatVector().Data)
 		}
 		{
 			data := createData([]string{"sentence 1", "sentence 2", "sentence 3"})
 			ret, _ := runner.ProcessInsert(data)
-			s.Equal([]float32{0.0, 0.1, 0.2, 0.3, 1.0, 1.1, 1.2, 1.3, 2.0, 2.1, 2.2, 2.3}, ret[0].GetVectors().GetFloatVector().Data)
+			s.Equal([]float32{0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 5.0}, ret[0].GetVectors().GetFloatVector().Data)
 		}
 	}
 	{
@@ -162,12 +162,12 @@ func (s *TextEmbeddingFunctionSuite) TestProcessInsert() {
 			s.NoError(err2)
 			s.Equal(1, len(ret))
 			s.Equal(int64(4), ret[0].GetVectors().Dim)
-			s.Equal([]float32{0.0, 0.1, 0.2, 0.3}, ret[0].GetVectors().GetFloatVector().Data)
+			s.Equal([]float32{0.0, 1.0, 2.0, 3.0}, ret[0].GetVectors().GetFloatVector().Data)
 		}
 		{
 			data := createData([]string{"sentence 1", "sentence 2", "sentence 3"})
 			ret, _ := runner.ProcessInsert(data)
-			s.Equal([]float32{0.0, 0.1, 0.2, 0.3, 1.0, 1.1, 1.2, 1.3, 2.0, 2.1, 2.2, 2.3}, ret[0].GetVectors().GetFloatVector().Data)
+			s.Equal([]float32{0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 5.0}, ret[0].GetVectors().GetFloatVector().Data)
 		}
 	}
 }
@@ -199,12 +199,12 @@ func (s *TextEmbeddingFunctionSuite) TestAliEmbedding() {
 		s.NoError(err2)
 		s.Equal(1, len(ret))
 		s.Equal(int64(4), ret[0].GetVectors().Dim)
-		s.Equal([]float32{0.0, 0.1, 0.2, 0.3}, ret[0].GetVectors().GetFloatVector().Data)
+		s.Equal([]float32{0.0, 1.0, 2.0, 3.0}, ret[0].GetVectors().GetFloatVector().Data)
 	}
 	{
 		data := createData([]string{"sentence 1", "sentence 2", "sentence 3"})
 		ret, _ := runner.ProcessInsert(data)
-		s.Equal([]float32{0.0, 0.1, 0.2, 0.3, 1.0, 1.1, 1.2, 1.3, 2.0, 2.1, 2.2, 2.3}, ret[0].GetVectors().GetFloatVector().Data)
+		s.Equal([]float32{0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0, 5.0}, ret[0].GetVectors().GetFloatVector().Data)
 	}
 
 	// multi-input
@@ -562,7 +562,7 @@ func (s *TextEmbeddingFunctionSuite) TestNewTextEmbeddings() {
 	}
 }
 
-func (s *TextEmbeddingFunctionSuite) TestProcessSearch() {
+func (s *TextEmbeddingFunctionSuite) TestProcessSearchFloat32() {
 	ts := CreateOpenAIEmbeddingServer()
 	defer ts.Close()
 	runner, err := NewTextEmbeddingFunction(s.schema, &schemapb.FunctionSchema{
@@ -606,6 +606,66 @@ func (s *TextEmbeddingFunctionSuite) TestProcessSearch() {
 		_, err = runner.ProcessSearch(&placeholderGroup)
 		s.Error(err)
 	}
+
+	// Normal inputs
+	{
+		f := &schemapb.FieldData{
+			Type:      schemapb.DataType_VarChar,
+			FieldId:   101,
+			IsDynamic: false,
+			Field: &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_StringData{
+						StringData: &schemapb.StringArray{
+							Data: strings.Split(strings.Repeat("Element,", 100), ","),
+						},
+					},
+				},
+			},
+		}
+
+		placeholderGroupBytes, err := funcutil.FieldDataToPlaceholderGroupBytes(f)
+		s.NoError(err)
+		placeholderGroup := commonpb.PlaceholderGroup{}
+		proto.Unmarshal(placeholderGroupBytes, &placeholderGroup)
+		_, err = runner.ProcessSearch(&placeholderGroup)
+		s.NoError(err)
+	}
+}
+
+func (s *TextEmbeddingFunctionSuite) TestProcessSearchInt8() {
+	ts := CreateCohereEmbeddingServer[int8]()
+	defer ts.Close()
+
+	s.schema = &schemapb.CollectionSchema{
+		Name: "test",
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: 100, Name: "int64", DataType: schemapb.DataType_Int64},
+			{FieldID: 101, Name: "text", DataType: schemapb.DataType_VarChar},
+			{
+				FieldID: 102, Name: "vector", DataType: schemapb.DataType_Int8Vector,
+				TypeParams: []*commonpb.KeyValuePair{
+					{Key: "dim", Value: "4"},
+				},
+			},
+		},
+	}
+	runner, err := NewTextEmbeddingFunction(s.schema, &schemapb.FunctionSchema{
+		Name:             "test",
+		Type:             schemapb.FunctionType_TextEmbedding,
+		InputFieldNames:  []string{"text"},
+		OutputFieldNames: []string{"vector"},
+		InputFieldIds:    []int64{101},
+		OutputFieldIds:   []int64{102},
+		Params: []*commonpb.KeyValuePair{
+			{Key: Provider, Value: cohereProvider},
+			{Key: modelNameParamKey, Value: embedEnglishV30},
+			{Key: dimParamKey, Value: "4"},
+			{Key: apiKeyParamKey, Value: "mock"},
+			{Key: embeddingURLParamKey, Value: ts.URL},
+		},
+	})
+	s.NoError(err)
 
 	// Normal inputs
 	{

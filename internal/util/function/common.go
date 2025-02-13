@@ -21,6 +21,8 @@ package function
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 )
 
 type TextEmbeddingMode int
@@ -28,6 +30,14 @@ type TextEmbeddingMode int
 const (
 	InsertMode TextEmbeddingMode = iota
 	SearchMode
+)
+
+type embeddingType int
+
+const (
+	unsupportEmbd embeddingType = iota
+	float32Embd
+	int8Embd
 )
 
 // common params
@@ -150,4 +160,52 @@ func parseAndCheckFieldDim(dimStr string, fieldDim int64, fieldName string) (int
 		return 0, fmt.Errorf("Function output field:[%s]'s dimension [%d] does not match the dimension [%d] provided in Function params.", fieldName, fieldDim, dim)
 	}
 	return dim, nil
+}
+
+func getEmbdType(dtype schemapb.DataType) embeddingType {
+	switch dtype {
+	case schemapb.DataType_FloatVector:
+		return float32Embd
+	case schemapb.DataType_Int8Vector:
+		return int8Embd
+	default:
+		return unsupportEmbd
+	}
+}
+
+type EmbdResult struct {
+	floatEmbds [][]float32
+	int8Embds  [][]int8
+	eType      embeddingType
+}
+
+func newEmbdResult(size int, eType embeddingType) *EmbdResult {
+	embR := EmbdResult{}
+	embR.eType = eType
+	if eType == float32Embd {
+		embR.floatEmbds = make([][]float32, 0, size)
+	} else {
+		embR.int8Embds = make([][]int8, 0, size)
+	}
+	return &embR
+}
+
+func (embR *EmbdResult) size() int {
+	if embR.eType == float32Embd {
+		return len(embR.floatEmbds)
+	}
+	return len(embR.int8Embds)
+}
+
+func (embR *EmbdResult) append(newEmbd any) {
+	switch newEmbd := newEmbd.(type) {
+	case [][]float32:
+		embR.floatEmbds = append(embR.floatEmbds, newEmbd...)
+	case []float32:
+		embR.floatEmbds = append(embR.floatEmbds, newEmbd)
+	case [][]int8:
+		embR.int8Embds = append(embR.int8Embds, newEmbd...)
+	case []int8:
+		embR.int8Embds = append(embR.int8Embds, newEmbd)
+	}
 }

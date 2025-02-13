@@ -78,7 +78,6 @@ func (c *TEIEmbedding) Embedding(texts []string, truncate bool, truncationDirect
 	} else {
 		r.Inputs = texts
 	}
-	fmt.Print(r.Inputs[0])
 
 	r.Truncate = truncate
 	if truncationDirection != "" {
