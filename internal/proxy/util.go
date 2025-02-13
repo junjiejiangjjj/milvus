@@ -725,7 +725,7 @@ func checkFunctionOutputField(function *schemapb.FunctionSchema, fields []*schem
 			return fmt.Errorf("BM25 function output field must be a SparseFloatVector field, but got %s", fields[0].DataType.String())
 		}
 	case schemapb.FunctionType_TextEmbedding:
-		if len(fields) != 1 || fields[0].DataType != schemapb.DataType_FloatVector {
+		if len(fields) != 1 || (fields[0].DataType != schemapb.DataType_FloatVector && fields[0].DataType != schemapb.DataType_Int8Vector) {
 			return fmt.Errorf("TextEmbedding function output field must be a FloatVector field")
 		}
 	default:
@@ -801,7 +801,7 @@ func checkFunctionBasicParams(function *schemapb.FunctionSchema) error {
 		}
 	case schemapb.FunctionType_TextEmbedding:
 		if len(function.GetParams()) == 0 {
-			return fmt.Errorf("TextEmbedding function need provider and model_name params")
+			return fmt.Errorf("TextEmbedding function accepts no params")
 		}
 	default:
 		return fmt.Errorf("check function params with unknown function type")

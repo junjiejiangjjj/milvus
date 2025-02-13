@@ -117,7 +117,7 @@ func (provider *TeiEmbeddingProvider) FieldDim() int64 {
 	return provider.fieldDim
 }
 
-func (provider *TeiEmbeddingProvider) CallEmbedding(texts []string, mode TextEmbeddingMode) ([][]float32, error) {
+func (provider *TeiEmbeddingProvider) CallEmbedding(texts []string, mode TextEmbeddingMode) (any, error) {
 	numRows := len(texts)
 	data := make([][]float32, 0, numRows)
 	var prompt string

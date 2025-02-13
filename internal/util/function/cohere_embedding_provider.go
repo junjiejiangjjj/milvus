@@ -119,7 +119,7 @@ func (provider *CohereEmbeddingProvider) getInputType(mode TextEmbeddingMode) st
 	return "search_query" // Used for embeddings of search queries run against a vector DB to find relevant documents.
 }
 
-func (provider *CohereEmbeddingProvider) CallEmbedding(texts []string, mode TextEmbeddingMode) ([][]float32, error) {
+func (provider *CohereEmbeddingProvider) CallEmbedding(texts []string, mode TextEmbeddingMode) (any, error) {
 	numRows := len(texts)
 	inputType := provider.getInputType(mode)
 	data := make([][]float32, 0, numRows)

@@ -47,7 +47,7 @@ const (
 // Text embedding for retrieval task
 type textEmbeddingProvider interface {
 	MaxBatch() int
-	CallEmbedding(texts []string, mode TextEmbeddingMode) ([][]float32, error)
+	CallEmbedding(texts []string, mode TextEmbeddingMode) (any, error)
 	FieldDim() int64
 }
 
@@ -126,6 +126,51 @@ func (runner *TextEmbeddingFunction) MaxBatch() int {
 	return runner.embProvider.MaxBatch()
 }
 
+func (runner *TextEmbeddingFunction) packToFieldData(embds any) ([]*schemapb.FieldData, error) {
+	var outputField schemapb.FieldData
+	outputField.FieldId = runner.GetOutputFields()[0].FieldID
+	outputField.FieldName = runner.GetOutputFields()[0].Name
+	outputField.Type = runner.GetOutputFields()[0].DataType
+	outputField.IsDynamic = runner.GetOutputFields()[0].IsDynamic
+	switch embds.(type) {
+	case [][]float32:
+		fembds := embds.([][]float32)
+		data := make([]float32, 0, len(fembds)*int(runner.embProvider.FieldDim()))
+		for _, emb := range fembds {
+			data = append(data, emb...)
+		}
+
+		outputField.Field = &schemapb.FieldData_Vectors{
+			Vectors: &schemapb.VectorField{
+				Data: &schemapb.VectorField_FloatVector{
+					FloatVector: &schemapb.FloatArray{
+						Data: data,
+					},
+				},
+				Dim: runner.embProvider.FieldDim(),
+			},
+		}
+	case int8:
+		int8Embds := embds.([][]int8)
+		data := make([]byte, 0, len(int8Embds)*int(runner.embProvider.FieldDim()))
+		for _, emb := range int8Embds {
+			for _, v := range emb {
+				data = append(data, byte(v))
+			}
+		}
+
+		outputField.Field = &schemapb.FieldData_Vectors{
+			Vectors: &schemapb.VectorField{
+				Data: &schemapb.VectorField_Int8Vector{
+					Int8Vector: data,
+				},
+				Dim: runner.embProvider.FieldDim(),
+			},
+		}
+	}
+	return []*schemapb.FieldData{&outputField}, nil
+}
+
 func (runner *TextEmbeddingFunction) ProcessInsert(inputs []*schemapb.FieldData) ([]*schemapb.FieldData, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("Text embedding function only receives one input field, but got [%d]", len(inputs))
@@ -147,27 +192,8 @@ func (runner *TextEmbeddingFunction) ProcessInsert(inputs []*schemapb.FieldData)
 	if err != nil {
 		return nil, err
 	}
-	data := make([]float32, 0, len(texts)*int(runner.embProvider.FieldDim()))
-	for _, emb := range embds {
-		data = append(data, emb...)
-	}
 
-	var outputField schemapb.FieldData
-	outputField.FieldId = runner.outputFields[0].FieldID
-	outputField.FieldName = runner.outputFields[0].Name
-	outputField.Type = runner.outputFields[0].DataType
-	outputField.IsDynamic = runner.outputFields[0].IsDynamic
-	outputField.Field = &schemapb.FieldData_Vectors{
-		Vectors: &schemapb.VectorField{
-			Data: &schemapb.VectorField_FloatVector{
-				FloatVector: &schemapb.FloatArray{
-					Data: data,
-				},
-			},
-			Dim: runner.embProvider.FieldDim(),
-		},
-	}
-	return []*schemapb.FieldData{&outputField}, nil
+	return runner.packToFieldData(embds)
 }
 
 func (runner *TextEmbeddingFunction) ProcessSearch(placeholderGroup *commonpb.PlaceholderGroup) (*commonpb.PlaceholderGroup, error) {
@@ -180,7 +206,13 @@ func (runner *TextEmbeddingFunction) ProcessSearch(placeholderGroup *commonpb.Pl
 	if err != nil {
 		return nil, err
 	}
-	return funcutil.Float32VectorsToPlaceholderGroup(embds), nil
+	if runner.GetOutputFields()[0].DataType == schemapb.DataType_FloatVector {
+		return funcutil.Float32VectorsToPlaceholderGroup(embds.([][]float32)), nil
+	} else if runner.GetOutputFields()[0].DataType == schemapb.DataType_Int8Vector {
+		return funcutil.Int8VectorsToPlaceholderGroup(embds.([][]int8)), nil
+	} else {
+		return nil, fmt.Errorf("Text embedding function doesn't support % vector", schemapb.DataType_name[int32(runner.GetOutputFields()[0].DataType)])
+	}
 }
 
 func (runner *TextEmbeddingFunction) ProcessBulkInsert(inputs []storage.FieldData) (map[storage.FieldID]storage.FieldData, error) {
@@ -201,16 +233,36 @@ func (runner *TextEmbeddingFunction) ProcessBulkInsert(inputs []storage.FieldDat
 	if err != nil {
 		return nil, err
 	}
-	data := make([]float32, 0, len(texts)*int(runner.embProvider.FieldDim()))
-	for _, emb := range embds {
-		data = append(data, emb...)
-	}
 
-	field := &storage.FloatVectorFieldData{
-		Data: data,
-		Dim:  int(runner.embProvider.FieldDim()),
+	switch embds.(type) {
+	case [][]float32:
+		data := make([]float32, 0, len(texts)*int(runner.embProvider.FieldDim()))
+		fembds := embds.([][]float32)
+		for _, emb := range fembds {
+			data = append(data, emb...)
+		}
+
+		field := &storage.FloatVectorFieldData{
+			Data: data,
+			Dim:  int(runner.embProvider.FieldDim()),
+		}
+		return map[storage.FieldID]storage.FieldData{
+			runner.outputFields[0].FieldID: field,
+		}, nil
+	case [][]int8:
+		data := make([]int8, 0, len(texts)*int(runner.embProvider.FieldDim()))
+		int8Embds := embds.([][]int8)
+		for _, emb := range int8Embds {
+			data = append(data, emb...)
+		}
+
+		field := &storage.Int8VectorFieldData{
+			Data: data,
+			Dim:  int(runner.embProvider.FieldDim()),
+		}
+		return map[storage.FieldID]storage.FieldData{
+			runner.outputFields[0].FieldID: field,
+		}, nil
 	}
-	return map[storage.FieldID]storage.FieldData{
-		runner.outputFields[0].FieldID: field,
-	}, nil
+	return nil, fmt.Errorf("Unkown embedding type")
 }
