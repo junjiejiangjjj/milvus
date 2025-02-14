@@ -93,7 +93,8 @@ func (s *CohereTextEmbeddingProviderSuite) TestEmbedding() {
 		s.NoError(err)
 		{
 			data := []string{"sentence"}
-			ret, err2 := provider.CallEmbedding(data, InsertMode)
+			r, err2 := provider.CallEmbedding(data, InsertMode)
+			ret := r.([][]float32)
 			s.NoError(err2)
 			s.Equal(1, len(ret))
 			s.Equal(4, len(ret[0]))
