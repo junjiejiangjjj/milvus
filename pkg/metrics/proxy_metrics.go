@@ -427,6 +427,15 @@ var (
 			Help:      "the number of non-zeros in each sparse search task",
 			Buckets:   buckets,
 		}, []string{nodeIDLabelName, collectionName})
+	// ProxyFunctionlatency records the latency of function
+	ProxyFunctionlatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: milvusNamespace,
+			Subsystem: typeutil.ProxyRole,
+			Name:      "function_udf_call_latency",
+			Help:      "latency of function call",
+			Buckets:   buckets,
+		}, []string{nodeIDLabelName, collectionName, functionTypeName, functionProvider, functionName})
 )
 
 // RegisterProxy registers Proxy metrics
@@ -490,6 +499,8 @@ func RegisterProxy(registry *prometheus.Registry) {
 	registry.MustRegister(ProxyRecallSearchCount)
 
 	registry.MustRegister(ProxySearchSparseNumNonZeros)
+
+	registry.MustRegister(ProxyFunctionlatency)
 
 	RegisterStreamingServiceClient(registry)
 }
