@@ -155,7 +155,6 @@ func (it *insertTask) PreExecute(ctx context.Context) error {
 			return err
 		}
 		sp.AddEvent("Call-function-udf")
-
 	}
 	rowNums := uint32(it.insertMsg.NRows())
 	// set insertTask.rowIDs

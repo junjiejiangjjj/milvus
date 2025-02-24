@@ -44,6 +44,7 @@ type Runner interface {
 	GetFunctionTypeName() string
 	GetFunctionName() string
 	GetFunctionProvider() string
+	Check() error
 
 	MaxBatch() int
 	ProcessInsert(ctx context.Context, inputs []*schemapb.FieldData) ([]*schemapb.FieldData, error)
@@ -73,8 +74,12 @@ func createFunction(coll *schemapb.CollectionSchema, schema *schemapb.FunctionSc
 // Since bm25 and embedding are implemented in different ways, the bm25 function is not verified here.
 func ValidateFunctions(schema *schemapb.CollectionSchema) error {
 	for _, fSchema := range schema.Functions {
-		if _, err := createFunction(schema, fSchema); err != nil {
+		f, err := createFunction(schema, fSchema)
+		if err != nil {
 			return err
+		}
+		if err := f.Check(); err != nil {
+			return fmt.Errorf("Check function [%s:%s] failed, the err is: %v", fSchema.Name, fSchema.GetType().String(), err)
 		}
 	}
 	return nil

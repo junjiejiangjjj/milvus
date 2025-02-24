@@ -56,16 +56,6 @@ const (
 	vertexAISTS          string = "STS"
 )
 
-func checkTask(modelName string, task string) error {
-	if task != vertexAIDocRetrival && task != vertexAICodeRetrival && task != vertexAISTS {
-		return fmt.Errorf("Unsupport task %s, the supported list: [%s, %s, %s]", task, vertexAIDocRetrival, vertexAICodeRetrival, vertexAISTS)
-	}
-	if modelName == textMultilingualEmbedding002 && task == vertexAICodeRetrival {
-		return fmt.Errorf("Model %s doesn't support %s task", textMultilingualEmbedding002, vertexAICodeRetrival)
-	}
-	return nil
-}
-
 type VertexAIEmbeddingProvider struct {
 	fieldDim int64
 
@@ -117,18 +107,11 @@ func NewVertexAIEmbeddingProvider(fieldSchema *schemapb.FieldSchema, functionSch
 	if task == "" {
 		task = vertexAIDocRetrival
 	}
-	if err := checkTask(modelName, task); err != nil {
-		return nil, err
-	}
 
 	if location == "" {
 		location = "us-central1"
 	}
 
-	if modelName != textEmbedding005 && modelName != textMultilingualEmbedding002 {
-		return nil, fmt.Errorf("Unsupported model: %s, only support [%s, %s]",
-			modelName, textEmbedding005, textMultilingualEmbedding002)
-	}
 	url := fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict", location, projectID, location, modelName)
 	var client *vertexai.VertexAIEmbedding
 	if c == nil {

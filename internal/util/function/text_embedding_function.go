@@ -21,6 +21,7 @@ package function
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
@@ -106,6 +107,26 @@ func NewTextEmbeddingFunction(coll *schemapb.CollectionSchema, functionSchema *s
 		FunctionBase: *base,
 		embProvider:  embP,
 	}, nil
+}
+
+func (runner *TextEmbeddingFunction) Check() error {
+	embds, err := runner.embProvider.CallEmbedding([]string{"check"}, InsertMode)
+	if err != nil {
+		return err
+	}
+	dim := 0
+	switch embds := embds.(type) {
+	case [][]float32:
+		dim = len(embds[0])
+	case [][]int8:
+		dim = len(embds[0])
+	default:
+		return fmt.Errorf("Unsupport embedding type: %s", reflect.TypeOf(embds).String())
+	}
+	if dim != int(runner.embProvider.FieldDim()) {
+		return fmt.Errorf("The dim set in the schema is inconsistent with the dim of the model, dim in schema is %d, dim of model is %d", runner.embProvider.FieldDim(), dim)
+	}
+	return nil
 }
 
 func (runner *TextEmbeddingFunction) MaxBatch() int {
