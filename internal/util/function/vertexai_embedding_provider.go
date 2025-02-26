@@ -42,7 +42,7 @@ func getVertexAIJsonKey() ([]byte, error) {
 		jsonKeyPath := os.Getenv(vertexServiceAccountJSONEnv)
 		jsonKey, err := os.ReadFile(jsonKeyPath)
 		if err != nil {
-			vtxKey.initErr = fmt.Errorf("Read service account json file failed, %v", err)
+			vtxKey.initErr = fmt.Errorf("Vertexai: read service account json file failed, %v", err)
 			return
 		}
 		vtxKey.jsonKey = jsonKey

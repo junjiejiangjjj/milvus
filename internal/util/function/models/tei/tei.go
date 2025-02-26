@@ -45,10 +45,10 @@ func NewTEIEmbeddingClient(apiKey string, endpoint string) (*TEIEmbedding, error
 		return nil, err
 	}
 	if base.Scheme != "http" && base.Scheme != "https" {
-		return nil, fmt.Errorf("%s is not a valid http/https link", endpoint)
+		return nil, fmt.Errorf("endpoint: [%s] is not a valid http/https link", endpoint)
 	}
 	if base.Host == "" {
-		return nil, fmt.Errorf("%s is not a valid http/https link", endpoint)
+		return nil, fmt.Errorf("endpoint: [%s] is not a valid http/https link", endpoint)
 	}
 
 	base.Path = "/embed"
