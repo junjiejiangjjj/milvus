@@ -138,6 +138,7 @@ func isEnableVerifiInfoInParamsKey(confParams map[string]string) bool {
 }
 
 func parseAKAndURL(params []*commonpb.KeyValuePair, confParams map[string]string, apiKeyEnv string) (string, string) {
+
 	// function param > env > yaml
 	var apiKey, url string
 
