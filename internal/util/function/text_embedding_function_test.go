@@ -31,6 +31,7 @@ import (
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/internal/util/testutil"
 	"github.com/milvus-io/milvus/pkg/v2/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/v2/util/paramtable"
 )
 
 func TestTextEmbeddingFunction(t *testing.T) {
@@ -43,6 +44,7 @@ type TextEmbeddingFunctionSuite struct {
 }
 
 func (s *TextEmbeddingFunctionSuite) SetupTest() {
+	paramtable.Init()
 	s.schema = &schemapb.CollectionSchema{
 		Name: "test",
 		Fields: []*schemapb.FieldSchema{
