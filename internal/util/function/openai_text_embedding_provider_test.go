@@ -77,9 +77,9 @@ func createOpenAIProvider(url string, schema *schemapb.FieldSchema, providerName
 	}
 	switch providerName {
 	case openAIProvider:
-		return NewOpenAIEmbeddingProvider(schema, functionSchema)
+		return NewOpenAIEmbeddingProvider(schema, functionSchema, map[string]string{})
 	case azureOpenAIProvider:
-		return NewAzureOpenAIEmbeddingProvider(schema, functionSchema)
+		return NewAzureOpenAIEmbeddingProvider(schema, functionSchema, map[string]string{})
 	default:
 		return nil, fmt.Errorf("Unknow provider")
 	}

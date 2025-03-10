@@ -37,9 +37,14 @@ type vertexAIJsonKey struct {
 
 var vtxKey vertexAIJsonKey
 
-func getVertexAIJsonKey() ([]byte, error) {
+func getVertexAIJsonKey(credentialsFilePath string) ([]byte, error) {
 	vtxKey.once.Do(func() {
-		jsonKeyPath := os.Getenv(vertexServiceAccountJSONEnv)
+		var jsonKeyPath string
+		if credentialsFilePath == "" {
+			jsonKeyPath = os.Getenv(vertexServiceAccountJSONEnv)
+		} else {
+			jsonKeyPath = credentialsFilePath
+		}
 		jsonKey, err := os.ReadFile(jsonKeyPath)
 		if err != nil {
 			vtxKey.initErr = fmt.Errorf("Vertexai: read service account json file failed, %v", err)
@@ -68,8 +73,8 @@ type VertexAIEmbeddingProvider struct {
 	timeoutSec int64
 }
 
-func createVertexAIEmbeddingClient(url string) (*vertexai.VertexAIEmbedding, error) {
-	jsonKey, err := getVertexAIJsonKey()
+func createVertexAIEmbeddingClient(url string, credentialsFilePath string) (*vertexai.VertexAIEmbedding, error) {
+	jsonKey, err := getVertexAIJsonKey(credentialsFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +82,7 @@ func createVertexAIEmbeddingClient(url string) (*vertexai.VertexAIEmbedding, err
 	return c, nil
 }
 
-func NewVertexAIEmbeddingProvider(fieldSchema *schemapb.FieldSchema, functionSchema *schemapb.FunctionSchema, c *vertexai.VertexAIEmbedding) (*VertexAIEmbeddingProvider, error) {
+func NewVertexAIEmbeddingProvider(fieldSchema *schemapb.FieldSchema, functionSchema *schemapb.FunctionSchema, c *vertexai.VertexAIEmbedding, params map[string]string) (*VertexAIEmbeddingProvider, error) {
 	fieldDim, err := typeutil.GetDim(fieldSchema)
 	if err != nil {
 		return nil, err
@@ -112,10 +117,13 @@ func NewVertexAIEmbeddingProvider(fieldSchema *schemapb.FieldSchema, functionSch
 		location = "us-central1"
 	}
 
-	url := fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict", location, projectID, location, modelName)
+	url := params["url"]
+	if url == "" {
+		url = fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict", location, projectID, location, modelName)
+	}
 	var client *vertexai.VertexAIEmbedding
 	if c == nil {
-		client, err = createVertexAIEmbeddingClient(url)
+		client, err = createVertexAIEmbeddingClient(url, params["credentials_file_path"])
 		if err != nil {
 			return nil, err
 		}

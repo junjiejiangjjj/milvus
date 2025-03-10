@@ -27,6 +27,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/storage"
 	"github.com/milvus-io/milvus/pkg/v2/util/funcutil"
+	"github.com/milvus-io/milvus/pkg/v2/util/paramtable"
 )
 
 const (
@@ -85,25 +86,26 @@ func NewTextEmbeddingFunction(coll *schemapb.CollectionSchema, functionSchema *s
 
 	var embP textEmbeddingProvider
 	var newProviderErr error
+	conf := paramtable.Get().FunctionCfg.GetTextEmbeddingProviderConfig(base.provider)
 	switch base.provider {
 	case openAIProvider:
-		embP, newProviderErr = NewOpenAIEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewOpenAIEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	case azureOpenAIProvider:
-		embP, newProviderErr = NewAzureOpenAIEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewAzureOpenAIEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	case bedrockProvider:
-		embP, newProviderErr = NewBedrockEmbeddingProvider(base.outputFields[0], functionSchema, nil)
+		embP, newProviderErr = NewBedrockEmbeddingProvider(base.outputFields[0], functionSchema, nil, conf)
 	case aliDashScopeProvider:
-		embP, newProviderErr = NewAliDashScopeEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewAliDashScopeEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	case vertexAIProvider:
-		embP, newProviderErr = NewVertexAIEmbeddingProvider(base.outputFields[0], functionSchema, nil)
+		embP, newProviderErr = NewVertexAIEmbeddingProvider(base.outputFields[0], functionSchema, nil, conf)
 	case voyageAIProvider:
-		embP, newProviderErr = NewVoyageAIEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewVoyageAIEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	case cohereProvider:
-		embP, newProviderErr = NewCohereEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewCohereEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	case siliconflowProvider:
-		embP, newProviderErr = NewSiliconflowEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewSiliconflowEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	case teiProvider:
-		embP, newProviderErr = NewTEIEmbeddingProvider(base.outputFields[0], functionSchema)
+		embP, newProviderErr = NewTEIEmbeddingProvider(base.outputFields[0], functionSchema, conf)
 	default:
 		return nil, fmt.Errorf("Unsupported text embedding service provider: [%s] , list of supported [%s, %s, %s, %s, %s, %s, %s, %s, %s]", base.provider, openAIProvider, azureOpenAIProvider, aliDashScopeProvider, bedrockProvider, vertexAIProvider, voyageAIProvider, cohereProvider, siliconflowProvider, teiProvider)
 	}
