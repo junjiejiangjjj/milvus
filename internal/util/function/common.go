@@ -138,15 +138,8 @@ func isEnableVerifiInfoInParamsKey(confParams map[string]string) bool {
 }
 
 func parseAKAndURL(params []*commonpb.KeyValuePair, confParams map[string]string) (string, string) {
-	var apiKey, url string
-	for key, value := range confParams {
-		switch key {
-		case apiKeyParamKey:
-			apiKey = value
-		case embeddingURLParamKey:
-			url = value
-		}
-	}
+	apiKey := confParams[apiKeyParamKey]
+	url := confParams[embeddingURLParamKey]
 
 	if !isEnableVerifiInfoInParamsKey(confParams) {
 		return apiKey, url

@@ -81,15 +81,8 @@ func createBedRockEmbeddingClient(awsAccessKeyId string, awsSecretAccessKey stri
 }
 
 func parseAccessInfo(params []*commonpb.KeyValuePair, confParams map[string]string) (string, string) {
-	var awsAccessKeyId, awsSecretAccessKey string
-	for key, value := range confParams {
-		switch key {
-		case awsAKIdParamKey:
-			awsAccessKeyId = value
-		case awsSAKParamKey:
-			awsSecretAccessKey = value
-		}
-	}
+	awsAccessKeyId := confParams[awsAKIdParamKey]
+	awsSecretAccessKey := confParams[awsSAKParamKey]
 
 	if !isEnableVerifiInfoInParamsKey(confParams) {
 		return awsAccessKeyId, awsSecretAccessKey

@@ -47,6 +47,8 @@ func (p *functionConfig) init(base *BaseTable) {
 				return "Your azure openai embedding url, Default is the official embedding url"
 			case "azure_openai.url":
 				return "Your azure openai api key"
+			case "azure_openai.resource_name":
+				return "Your azure openai resource name"
 			case "openai.api_key":
 				return "Your openai embedding url, Default is the official embedding url"
 			case "openai.url":
@@ -74,7 +76,7 @@ func (p *functionConfig) init(base *BaseTable) {
 			case "vertexai.url":
 				return "Your VertexAI embedding url"
 			case "vertexai.credentials_file_path":
-				return "Path to your google application credentials"
+				return "Path to your google application credentials, change the file path to refresh the configuration"
 			default:
 				return ""
 			}

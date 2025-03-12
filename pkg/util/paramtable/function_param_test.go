@@ -43,6 +43,7 @@ func TestFunctionConfig(t *testing.T) {
 		"tei.enable",
 		"azure_openai.api_key",
 		"azure_openai.url",
+		"azure_openai.resource_name",
 		"openai.api_key",
 		"openai.url",
 		"dashscope.api_key",

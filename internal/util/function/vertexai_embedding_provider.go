@@ -30,29 +30,40 @@ import (
 )
 
 type vertexAIJsonKey struct {
-	jsonKey []byte
-	once    sync.Once
-	initErr error
+	mu       sync.Mutex
+	filePath string
+	jsonKey  []byte
 }
 
 var vtxKey vertexAIJsonKey
 
 func getVertexAIJsonKey(credentialsFilePath string) ([]byte, error) {
-	vtxKey.once.Do(func() {
-		var jsonKeyPath string
-		if credentialsFilePath == "" {
-			jsonKeyPath = os.Getenv(vertexServiceAccountJSONEnv)
-		} else {
-			jsonKeyPath = credentialsFilePath
-		}
-		jsonKey, err := os.ReadFile(jsonKeyPath)
-		if err != nil {
-			vtxKey.initErr = fmt.Errorf("Vertexai: read service account json file failed, %v", err)
-			return
-		}
-		vtxKey.jsonKey = jsonKey
-	})
-	return vtxKey.jsonKey, vtxKey.initErr
+	vtxKey.mu.Lock()
+	defer vtxKey.mu.Unlock()
+
+	var jsonKeyPath string
+	if credentialsFilePath == "" {
+		jsonKeyPath = os.Getenv(vertexServiceAccountJSONEnv)
+	} else {
+		jsonKeyPath = credentialsFilePath
+	}
+	if jsonKeyPath == "" {
+		return nil, fmt.Errorf("VetexAI credentials file path is empty")
+	}
+
+	if vtxKey.filePath == jsonKeyPath {
+		// The file path remains unchanged, using the data in the cache
+		return vtxKey.jsonKey, nil
+	}
+
+	jsonKey, err := os.ReadFile(jsonKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("Vertexai: read credentials file failed, %v", err)
+	}
+
+	vtxKey.jsonKey = jsonKey
+	vtxKey.filePath = jsonKeyPath
+	return vtxKey.jsonKey, nil
 }
 
 const (

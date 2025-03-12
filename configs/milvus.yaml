@@ -1159,6 +1159,7 @@ function:
     providers:
       azure_openai:
         api_key:  # Your azure openai embedding url, Default is the official embedding url
+        resource_name:  # Your azure openai resource name
         url:  # Your azure openai api key
       bedrock:
         aws_access_key_id:  # Your aws_access_key_id
@@ -1178,5 +1179,5 @@ function:
       tei:
         enable: true # Whether to enable TEI model service
       vertexai:
-        credentials_file_path:  # Path to your google application credentials
+        credentials_file_path:  # Path to your google application credentials, change the file path to refresh the configuration
         url:  # Your VertexAI embedding url

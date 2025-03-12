@@ -190,18 +190,18 @@ func (s *OpenAITextEmbeddingProviderSuite) TestCreateOpenAIEmbeddingClient() {
 }
 
 func (s *OpenAITextEmbeddingProviderSuite) TestCreateAzureOpenAIEmbeddingClient() {
-	_, err := createAzureOpenAIEmbeddingClient("", "")
+	_, err := createAzureOpenAIEmbeddingClient("", "", "")
 	s.Error(err)
 
 	os.Setenv(azureOpenaiAKEnvStr, "mockKey")
 	defer os.Unsetenv(azureOpenaiAKEnvStr)
 
-	_, err = createAzureOpenAIEmbeddingClient("", "")
+	_, err = createAzureOpenAIEmbeddingClient("", "", "")
 	s.Error(err)
 
 	os.Setenv(azureOpenaiResourceName, "mockResource")
 	defer os.Unsetenv(azureOpenaiResourceName)
 
-	_, err = createAzureOpenAIEmbeddingClient("", "")
+	_, err = createAzureOpenAIEmbeddingClient("", "", "")
 	s.NoError(err)
 }

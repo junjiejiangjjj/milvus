@@ -46,6 +46,15 @@ const (
 	teiProvider          string = "tei"
 )
 
+func hasEmptyString(texts []string) bool {
+	for _, text := range texts {
+		if text == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func TextEmbeddingOutputsCheck(fields []*schemapb.FieldSchema) error {
 	if len(fields) != 1 || (fields[0].DataType != schemapb.DataType_FloatVector && fields[0].DataType != schemapb.DataType_Int8Vector) {
 		return fmt.Errorf("TextEmbedding function output field must be a FloatVector or Int8Vector field")
@@ -215,10 +224,16 @@ func (runner *TextEmbeddingFunction) ProcessInsert(ctx context.Context, inputs [
 	if texts == nil {
 		return nil, fmt.Errorf("Input texts is empty")
 	}
+
+	// make sure all texts are not empty
+	if hasEmptyString(texts) {
+		return nil, fmt.Errorf("There is an empty string in the input data, TextEmbedding function does not support empty text")
+	}
 	numRows := len(texts)
 	if numRows > runner.MaxBatch() {
 		return nil, fmt.Errorf("Embedding supports up to [%d] pieces of data at a time, got [%d]", runner.MaxBatch(), numRows)
 	}
+
 	embds, err := runner.embProvider.CallEmbedding(texts, InsertMode)
 	if err != nil {
 		return nil, err
@@ -232,6 +247,10 @@ func (runner *TextEmbeddingFunction) ProcessSearch(ctx context.Context, placehol
 	numRows := len(texts)
 	if numRows > runner.MaxBatch() {
 		return nil, fmt.Errorf("Embedding supports up to [%d] pieces of data at a time, got [%d]", runner.MaxBatch(), numRows)
+	}
+	// make sure all texts are not empty
+	if hasEmptyString(texts) {
+		return nil, fmt.Errorf("There is an empty string in the queries, TextEmbedding function does not support empty text")
 	}
 	embds, err := runner.embProvider.CallEmbedding(texts, SearchMode)
 	if err != nil {
@@ -259,6 +278,11 @@ func (runner *TextEmbeddingFunction) ProcessBulkInsert(inputs []storage.FieldDat
 		return nil, fmt.Errorf("Input texts is empty")
 	}
 
+	// make sure all texts are not empty
+	// In storage.FieldData, null is also stored as an empty string
+	if hasEmptyString(texts) {
+		return nil, fmt.Errorf("There is an empty string in the input data, TextEmbedding function does not support empty text")
+	}
 	embds, err := runner.embProvider.CallEmbedding(texts, InsertMode)
 	if err != nil {
 		return nil, err
