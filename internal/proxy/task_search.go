@@ -675,9 +675,13 @@ func (t *searchTask) hybridSearchRank(ctx context.Context, span trace.Span, mult
 		for i := 0; i < len(multipleMilvusResults); i++ {
 			multipleMilvusResults[i].Results.FieldsData = fields[i]
 		}
+		groupScorerStr, err := funcutil.GetAttrByKeyFromRepeatedKV(RankGroupScorer, t.request.GetSearchParams())
+		if err != nil {
+			groupScorerStr = MaxScorer
+		}
 		params := rerank.NewSearchParams(
 			t.Nq, t.rankParams.limit, t.rankParams.offset, t.rankParams.roundDecimal,
-			t.rankParams.groupByFieldId, t.rankParams.groupSize, t.rankParams.strictGroupSize, searchMetrics,
+			t.rankParams.groupByFieldId, t.rankParams.groupSize, t.rankParams.strictGroupSize, groupScorerStr, searchMetrics,
 		)
 
 		if t.result, err = t.functionScore.Process(ctx, params, multipleMilvusResults); err != nil {
@@ -689,9 +693,13 @@ func (t *searchTask) hybridSearchRank(ctx context.Context, span trace.Span, mult
 			t.result.Results.FieldsData = fields[0]
 		}
 	} else {
+		groupScorerStr, err := funcutil.GetAttrByKeyFromRepeatedKV(RankGroupScorer, t.request.GetSearchParams())
+		if err != nil {
+			groupScorerStr = MaxScorer
+		}
 		params := rerank.NewSearchParams(
 			t.Nq, t.rankParams.limit, t.rankParams.offset, t.rankParams.roundDecimal,
-			t.rankParams.groupByFieldId, t.rankParams.groupSize, t.rankParams.strictGroupSize, searchMetrics,
+			t.rankParams.groupByFieldId, t.rankParams.groupSize, t.rankParams.strictGroupSize, groupScorerStr, searchMetrics,
 		)
 		if t.result, err = t.functionScore.Process(ctx, params, multipleMilvusResults); err != nil {
 			return err
@@ -816,8 +824,12 @@ func (t *searchTask) searchPostProcess(ctx context.Context, span trace.Span, toR
 	}
 
 	if t.functionScore != nil && len(result.Results.FieldsData) != 0 {
+		groupScorerStr, err := funcutil.GetAttrByKeyFromRepeatedKV(RankGroupScorer, t.request.GetSearchParams())
+		if err != nil {
+			groupScorerStr = MaxScorer
+		}
 		params := rerank.NewSearchParams(t.Nq, t.SearchRequest.GetTopk(), t.SearchRequest.GetOffset(),
-			t.queryInfos[0].RoundDecimal, t.queryInfos[0].GroupByFieldId, t.queryInfos[0].GroupSize, t.queryInfos[0].StrictGroupSize, []string{metricType})
+			t.queryInfos[0].RoundDecimal, t.queryInfos[0].GroupByFieldId, t.queryInfos[0].GroupSize, t.queryInfos[0].StrictGroupSize, groupScorerStr, []string{metricType})
 		// rank only returns id and score
 		if t.result, err = t.functionScore.Process(ctx, params, []*milvuspb.SearchResults{result}); err != nil {
 			return err

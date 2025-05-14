@@ -32,6 +32,9 @@ import (
 
 const (
 	decayFunctionName string = "decay"
+	maxScorer         string = "max"
+	sumScorer         string = "sum"
+	avgScorer         string = "avg"
 )
 
 type SearchParams struct {
@@ -40,17 +43,24 @@ type SearchParams struct {
 	offset       int64
 	roundDecimal int64
 
-	// TODO: supports group search
 	groupByFieldId  int64
 	groupSize       int64
 	strictGroupSize bool
+	groupScore      string
 
 	searchMetrics []string
 }
 
-func NewSearchParams(nq, limit, offset, roundDecimal, groupByFieldId, groupSize int64, strictGroupSize bool, searchMetrics []string) *SearchParams {
+func (s *SearchParams) isGrouping() bool {
+	return s.groupByFieldId > 0
+}
+
+func NewSearchParams(nq, limit, offset, roundDecimal, groupByFieldId, groupSize int64, strictGroupSize bool, groupScore string, searchMetrics []string) *SearchParams {
+	if groupScore == "" {
+		groupScore = maxScorer
+	}
 	return &SearchParams{
-		nq, limit, offset, roundDecimal, groupByFieldId, groupSize, strictGroupSize, searchMetrics,
+		nq, limit, offset, roundDecimal, groupByFieldId, groupSize, strictGroupSize, groupScore, searchMetrics,
 	}
 }
 
@@ -134,7 +144,7 @@ func (fScore *FunctionScore) Process(ctx context.Context, searchParams *SearchPa
 	})
 
 	// rankResult only has scores
-	inputs, err := newRerankInputs(allSearchResultData, fScore.reranker.GetInputFieldIDs())
+	inputs, err := newRerankInputs(allSearchResultData, fScore.reranker.GetInputFieldIDs(), searchParams.isGrouping())
 	if err != nil {
 		return nil, err
 	}
