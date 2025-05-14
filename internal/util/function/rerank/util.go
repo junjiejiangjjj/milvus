@@ -32,10 +32,11 @@ type PKType interface {
 
 // Data for a single search result for a single query, with multi fields
 type columns struct {
-	data   []any
-	size   int64
-	ids    any
-	scores []float32
+	data         []any
+	groupingData any
+	size         int64
+	ids          any
+	scores       []float32
 }
 
 type rerankInputs struct {
@@ -69,7 +70,7 @@ func organizeFieldIdData(multipSearchResultData []*schemapb.SearchResultData, in
 	return multipIdField, nil
 }
 
-func newRerankInputs(multipSearchResultData []*schemapb.SearchResultData, inputFieldIds []int64) (*rerankInputs, error) {
+func newRerankInputs(multipSearchResultData []*schemapb.SearchResultData, inputFieldIds []int64, grouping bool) (*rerankInputs, error) {
 	if len(multipSearchResultData) == 0 {
 		return &rerankInputs{}, nil
 	}
@@ -98,6 +99,8 @@ func newRerankInputs(multipSearchResultData []*schemapb.SearchResultData, inputF
 					cols[i][retIdx].size = size
 					cols[i][retIdx].ids = getIds(searchResult.Ids, start, size)
 					cols[i][retIdx].scores = searchResult.Scores[start : start+size]
+					d, _ := getField(searchResult.GroupByFieldValue, start, size)
+					cols[i][retIdx].groupingData = d
 				}
 				cols[i][retIdx].data = append(cols[i][retIdx].data, d)
 				start += size
@@ -153,27 +156,10 @@ func appendResult[T PKType](outputs *rerankOutputs, ids []T, scores []float32) {
 }
 
 type IDScores[T PKType] struct {
-	// idScores map[T]float32
 	ids    []T
 	scores []float32
 	size   int64
 }
-
-// func (s *IDScores[T]) GetSortedIdScores() ([]T, []float32) {
-// 	ids := make([]T, 0, s.size)
-// 	big := func(i, j int) bool {
-// 		if s.idScores[ids[i]] == s.idScores[ids[j]] {
-// 			return ids[i] < ids[j]
-// 		}
-// 		return s.idScores[ids[i]] > s.idScores[ids[j]]
-// 	}
-// 	sort.Slice(ids, big)
-// 	scores := make([]float32, 0, s.size)
-// 	for _, id := range ids {
-// 		scores = append(scores, s.idScores[id])
-// 	}
-// 	return ids, scores
-// }
 
 func newIDScores[T PKType](idScores map[T]float32, searchParams *SearchParams) *IDScores[T] {
 	ids := make([]T, 0, len(idScores))
@@ -236,7 +222,7 @@ func getField(inputField *schemapb.FieldData, start int64, size int64) (any, err
 			return inputField.GetScalars().GetBoolData().Data[start : start+size], nil
 		}
 		return []bool{}, nil
-	case schemapb.DataType_String:
+	case schemapb.DataType_String, schemapb.DataType_VarChar:
 		if inputField.GetScalars() != nil && inputField.GetScalars().GetStringData() != nil {
 			return inputField.GetScalars().GetStringData().Data[start : start+size], nil
 		}
