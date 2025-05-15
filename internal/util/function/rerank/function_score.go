@@ -28,10 +28,12 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/pkg/v2/util/merr"
+	// "github.com/milvus-io/milvus/pkg/v2/util/paramtable"
 )
 
 const (
 	decayFunctionName string = "decay"
+	modelFunctionName string = "model"
 )
 
 type SearchParams struct {
@@ -92,8 +94,11 @@ func createFunction(collSchema *schemapb.CollectionSchema, funcSchema *schemapb.
 	switch rerankerName {
 	case decayFunctionName:
 		rerankFunc, newRerankErr = newDecayFunction(collSchema, funcSchema)
+	case modelFunctionName:
+		// conf := paramtable.Get().FunctionCfg.GetRerankModelProviders("")
+		rerankFunc, newRerankErr = newModelFunction(collSchema, funcSchema)
 	default:
-		return nil, fmt.Errorf("Unsupported rerank function: [%s] , list of supported [%s]", rerankerName, decayFunctionName)
+		return nil, fmt.Errorf("Unsupported rerank function: [%s] , list of supported [%s,%s]", rerankerName, decayFunctionName, modelFunctionName)
 	}
 
 	if newRerankErr != nil {
