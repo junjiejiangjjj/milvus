@@ -100,6 +100,8 @@ const (
 	ListAliasesTaskName           = "ListAliasesTask"
 	AlterCollectionTaskName       = "AlterCollectionTask"
 	AlterCollectionFieldTaskName  = "AlterCollectionFieldTask"
+	AddCollectionFunctionTask     = "AddCollectionFunctionTask"
+	DropCollectionFunctionTask    = "DropCollectionFunctionTask"
 	UpsertTaskName                = "UpsertTask"
 	CreateResourceGroupTaskName   = "CreateResourceGroupTask"
 	UpdateResourceGroupsTaskName  = "UpdateResourceGroupsTask"

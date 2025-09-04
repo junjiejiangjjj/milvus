@@ -89,6 +89,38 @@ func (req *CollectionReqWithProperties) GetCollectionName() string {
 	return req.CollectionName
 }
 
+type CollectionDropFunction struct {
+	DbName         string `json:"dbName"`
+	CollectionName string `json:"collectionName" binding:"required"`
+	FunctionName   string `json:"FunctionName" binding:"required"`
+}
+
+func (req *CollectionDropFunction) GetDbName() string { return req.DbName }
+
+func (req *CollectionDropFunction) GetCollectionName() string {
+	return req.CollectionName
+}
+
+func (req *CollectionDropFunction) GetFunctionName() string {
+	return req.FunctionName
+}
+
+type CollectionAddFunction struct {
+	DbName         string         `json:"dbName"`
+	CollectionName string         `json:"collectionName" binding:"required"`
+	Function       FunctionSchema `json:"function" binding:"required"`
+}
+
+func (req *CollectionAddFunction) GetDbName() string { return req.DbName }
+
+func (req *CollectionAddFunction) GetCollectionName() string {
+	return req.CollectionName
+}
+
+func (req *CollectionAddFunction) GetFunction() *FunctionSchema {
+	return &req.Function
+}
+
 type OptionalCollectionNameReq struct {
 	DbName         string `json:"dbName"`
 	CollectionName string `json:"collectionName"`
