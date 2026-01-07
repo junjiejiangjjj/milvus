@@ -24,21 +24,55 @@ import (
 	"github.com/apache/arrow/go/v17/arrow"
 	// "github.com/apache/arrow/go/v17/arrow/array"
 	"github.com/apache/arrow/go/v17/arrow/memory"
-	// "github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 )
 
 const (
 	IDFieldName    = "$id"
 	ScoreFieldName = "$score"
+	QueryFieldName = "$query"
 )
 
 type ChainContext struct {
 }
 
 type DataFrame struct {
-	pool  *memory.Allocator
-	table *arrow.Table
+	pool       *memory.Allocator
+	table      arrow.Table
+	chunkCount int
+	nameIndex  map[string]int
+}
+
+func (df *DataFrame) release() {
+}
+
+func (df *DataFrame) GetChunkCount() int {
+	return df.chunkCount
+}
+
+func (df *DataFrame) GetColumns(colNames []string, chunkIndex int) ([]arrow.Array, error) {
+	if chunkIndex < 0 || chunkIndex >= df.chunkCount {
+		return nil, fmt.Errorf("chunk index out of range: %d", chunkIndex)
+	}
+	columns := make([]arrow.Array, 0, len(colNames))
+	for _, colName := range colNames {
+		colIdx, exists := df.nameIndex[colName]
+		if !exists {
+			return nil, fmt.Errorf("column %s not found", colName)
+		}
+		columns = append(columns, df.table.Column(colIdx).Data().Chunk(chunkIndex))
+	}
+	return columns, nil
+}
+
+func FromSearchResultProto(collSchema *schemapb.CollectionSchema, searchData *milvuspb.SearchResults) (*DataFrame, error) {
+	return nil, nil
+}
+
+func (df *DataFrame) ToSearchResultProto() (*milvuspb.SearchResults, error) {
+	df.release()
+	return nil, nil
 }
 
 /*

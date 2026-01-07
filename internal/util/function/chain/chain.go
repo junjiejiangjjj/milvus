@@ -56,11 +56,11 @@ type Operator interface {
 }
 
 type BaseOperator struct {
-	Inputs     []string
-	Outputs    []string
-	ReturnType arrow.DataType
-	Alloc      memory.Allocator
-	Impl       Expr
+	inputs     []string
+	outputs    []string
+	returnType []arrow.DataType
+	alloc      memory.Allocator
+	impl       Expr
 }
 
 type MapOperator struct {
@@ -68,6 +68,16 @@ type MapOperator struct {
 }
 
 func (o *MapOperator) Run(ctx *ChainContext, input *DataFrame) (*DataFrame, error) {
+	for chunkIndex := 0; chunkIndex < input.GetChunkCount(); chunkIndex++ {
+		columns, err := input.GetColumns(o.inputs, chunkIndex)
+		if err != nil {
+			return nil, err
+		}
+		_, err = o.impl.Eval(ctx, o.alloc, columns)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return nil, nil
 }
 
