@@ -23,11 +23,12 @@ package types
 // =============================================================================
 
 const (
-	OpTypeMap    = "map"
-	OpTypeFilter = "filter"
-	OpTypeSelect = "select"
-	OpTypeSort   = "sort"
-	OpTypeLimit  = "limit"
+	OpTypeMap     = "map"
+	OpTypeFilter  = "filter"
+	OpTypeSelect  = "select"
+	OpTypeSort    = "sort"
+	OpTypeLimit   = "limit"
+	OpTypeGroupBy = "group_by"
 )
 
 // =============================================================================

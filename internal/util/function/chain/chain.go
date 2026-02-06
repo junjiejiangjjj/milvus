@@ -298,6 +298,36 @@ func (fc *FuncChain) Merge(strategy MergeStrategy, opts ...MergeOption) *FuncCha
 	return fc.Add(NewMergeOp(strategy, opts...))
 }
 
+// GroupBy groups rows by a field for grouping search scenarios.
+// It keeps top groupSize rows per group (sorted by $score DESC),
+// sorts groups by group score, and returns up to limit groups after skipping offset groups.
+// A $group_score column is automatically added containing the max score of each group.
+//
+// Parameters:
+//   - groupByField: the field to group by
+//   - groupSize: maximum rows per group
+//   - limit: maximum number of groups to return
+//   - offset: number of groups to skip
+//
+// Example:
+//
+//	chain.GroupBy("category", 3, 10, 0)  // group by category, top 3 per group, return 10 groups
+func (fc *FuncChain) GroupBy(groupByField string, groupSize, limit, offset int64) *FuncChain {
+	if groupByField == "" {
+		return fc.addWithError(nil, fmt.Errorf("groupByField cannot be empty"))
+	}
+	if groupSize <= 0 {
+		return fc.addWithError(nil, fmt.Errorf("groupSize must be positive, got %d", groupSize))
+	}
+	if limit <= 0 {
+		return fc.addWithError(nil, fmt.Errorf("limit must be positive, got %d", limit))
+	}
+	if offset < 0 {
+		return fc.addWithError(nil, fmt.Errorf("offset must be non-negative, got %d", offset))
+	}
+	return fc.Add(NewGroupByOp(groupByField, groupSize, limit, offset))
+}
+
 // String returns a string representation of the FuncChain.
 func (fc *FuncChain) String() string {
 	buf := bytes.NewBufferString(fmt.Sprintf("FuncChain: %s\n", fc.name))
