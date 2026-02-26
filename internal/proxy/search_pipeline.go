@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/samber/lo"
 	"github.com/tidwall/gjson"
 	"go.opentelemetry.io/otel"
@@ -34,7 +35,8 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"
 	"github.com/milvus-io/milvus/internal/parser/planparserv2"
 	"github.com/milvus-io/milvus/internal/types"
-	"github.com/milvus-io/milvus/internal/util/function/rerank"
+	"github.com/milvus-io/milvus/internal/util/function/chain"
+	"github.com/milvus-io/milvus/internal/util/function/models"
 	"github.com/milvus-io/milvus/internal/util/segcore"
 	"github.com/milvus-io/milvus/pkg/v2/log"
 	"github.com/milvus-io/milvus/pkg/v2/proto/internalpb"
@@ -160,6 +162,7 @@ type searchReduceOperator struct {
 	collectionID       int64
 	partitionIDs       []int64
 	queryInfos         []*planpb.QueryInfo
+	collSchema         *schemapb.CollectionSchema
 }
 
 func newSearchReduceOperator(t *searchTask, _ map[string]any) (operator, error) {
@@ -176,6 +179,7 @@ func newSearchReduceOperator(t *searchTask, _ map[string]any) (operator, error) 
 		collectionID:       t.GetCollectionID(),
 		partitionIDs:       t.GetPartitionIDs(),
 		queryInfos:         t.queryInfos,
+		collSchema:         t.schema.CollectionSchema,
 	}, nil
 }
 
@@ -190,6 +194,7 @@ func (op *searchReduceOperator) run(ctx context.Context, span trace.Span, inputs
 	if err != nil {
 		return nil, err
 	}
+	fillFieldNames(op.collSchema, result.GetResults())
 	return []any{[]*milvuspb.SearchResults{result}, []string{metricType}}, nil
 }
 
@@ -200,6 +205,7 @@ type hybridSearchReduceOperator struct {
 	collectionID       int64
 	partitionIDs       []int64
 	queryInfos         []*planpb.QueryInfo
+	collSchema         *schemapb.CollectionSchema
 }
 
 func newHybridSearchReduceOperator(t *searchTask, _ map[string]any) (operator, error) {
@@ -214,6 +220,7 @@ func newHybridSearchReduceOperator(t *searchTask, _ map[string]any) (operator, e
 		collectionID:       t.GetCollectionID(),
 		partitionIDs:       t.GetPartitionIDs(),
 		queryInfos:         t.queryInfos,
+		collSchema:         t.schema.CollectionSchema,
 	}, nil
 }
 
@@ -257,6 +264,7 @@ func (op *hybridSearchReduceOperator) run(ctx context.Context, span trace.Span, 
 		if err != nil {
 			return nil, err
 		}
+		fillFieldNames(op.collSchema, result.GetResults())
 		searchMetrics = append(searchMetrics, subMetricType)
 		multipleMilvusResults[index] = result
 	}
@@ -264,43 +272,96 @@ func (op *hybridSearchReduceOperator) run(ctx context.Context, span trace.Span, 
 }
 
 type rerankOperator struct {
-	nq              int64
-	topK            int64
-	offset          int64
-	roundDecimal    int64
-	groupByFieldId  int64
-	groupSize       int64
-	strictGroupSize bool
-	groupScorerStr  string
+	nq               int64
+	topK             int64
+	offset           int64
+	roundDecimal     int64
+	groupByFieldName string
+	groupSize        int64
+	groupScorerStr   string
 
-	functionScore *rerank.FunctionScore
+	collSchema *schemapb.CollectionSchema
+	rerankMeta rerankMeta
+	dbName     string
+}
+
+func resolveFieldName(schema *schemapb.CollectionSchema, fieldID int64) string {
+	for _, field := range schema.GetFields() {
+		if field.GetFieldID() == fieldID {
+			return field.GetName()
+		}
+	}
+	return ""
+}
+
+// fillFieldNames populates missing FieldName in SearchResultData using the collection schema.
+// Real search results from QueryNode only have FieldId set; FieldName is empty.
+func fillFieldNames(schema *schemapb.CollectionSchema, resultData *schemapb.SearchResultData) {
+	if schema == nil || resultData == nil {
+		return
+	}
+	fieldIDToName := make(map[int64]string, len(schema.GetFields()))
+	for _, field := range schema.GetFields() {
+		fieldIDToName[field.GetFieldID()] = field.GetName()
+	}
+	for _, fd := range resultData.GetFieldsData() {
+		if fd.GetFieldName() == "" {
+			if name, ok := fieldIDToName[fd.GetFieldId()]; ok {
+				fd.FieldName = name
+			}
+		}
+	}
+	if gbv := resultData.GetGroupByFieldValue(); gbv != nil && gbv.GetFieldName() == "" {
+		if name, ok := fieldIDToName[gbv.GetFieldId()]; ok {
+			gbv.FieldName = name
+		}
+	}
 }
 
 func newRerankOperator(t *searchTask, params map[string]any) (operator, error) {
 	if t.SearchRequest.GetIsAdvanced() {
 		return &rerankOperator{
-			nq:              t.GetNq(),
-			topK:            t.rankParams.limit,
-			offset:          t.rankParams.offset,
-			roundDecimal:    t.rankParams.roundDecimal,
-			groupByFieldId:  t.rankParams.groupByFieldId,
-			groupSize:       t.rankParams.groupSize,
-			strictGroupSize: t.rankParams.strictGroupSize,
-			groupScorerStr:  getGroupScorerStr(t.request.GetSearchParams()),
-			functionScore:   t.functionScore,
+			nq:               t.GetNq(),
+			topK:             t.rankParams.limit,
+			offset:           t.rankParams.offset,
+			roundDecimal:     t.rankParams.roundDecimal,
+			groupByFieldName: t.rankParams.GetGroupByFieldName(),
+			groupSize:        t.rankParams.groupSize,
+			groupScorerStr:   getGroupScorerStr(t.request.GetSearchParams()),
+			collSchema:       t.schema.CollectionSchema,
+			rerankMeta:       t.rerankMeta,
+			dbName:           t.request.GetDbName(),
 		}, nil
 	}
 	return &rerankOperator{
-		nq:              t.SearchRequest.GetNq(),
-		topK:            t.SearchRequest.GetTopk(),
-		offset:          0, // Search performs Offset in the reduce phase
-		roundDecimal:    t.queryInfos[0].RoundDecimal,
-		groupByFieldId:  t.queryInfos[0].GroupByFieldId,
-		groupSize:       t.queryInfos[0].GroupSize,
-		strictGroupSize: t.queryInfos[0].StrictGroupSize,
-		groupScorerStr:  getGroupScorerStr(t.request.GetSearchParams()),
-		functionScore:   t.functionScore,
+		nq:               t.SearchRequest.GetNq(),
+		topK:             t.SearchRequest.GetTopk(),
+		offset:           0, // Search performs Offset in the reduce phase
+		roundDecimal:     t.queryInfos[0].RoundDecimal,
+		groupByFieldName: resolveFieldName(t.schema.CollectionSchema, t.queryInfos[0].GroupByFieldId),
+		groupSize:        t.queryInfos[0].GroupSize,
+		groupScorerStr:   getGroupScorerStr(t.request.GetSearchParams()),
+		collSchema:       t.schema.CollectionSchema,
+		rerankMeta:       t.rerankMeta,
+		dbName:           t.request.GetDbName(),
 	}, nil
+}
+
+func buildChainFromMeta(
+	meta rerankMeta,
+	collSchema *schemapb.CollectionSchema,
+	metrics []string,
+	searchParams *chain.SearchParams,
+	alloc memory.Allocator,
+) (*chain.FuncChain, error) {
+	switch m := meta.(type) {
+	case *funcScoreRerankMeta:
+		return chain.BuildRerankChain(collSchema, m.funcScore, metrics, searchParams, alloc)
+	case *legacyRerankMeta:
+		return chain.BuildRerankChainWithLegacy(collSchema, m.legacyParams, metrics, searchParams, alloc)
+	default:
+		return nil, fmt.Errorf("rerank operator: unsupported rerankMeta type %T", meta)
+	}
 }
 
 func (op *rerankOperator) run(ctx context.Context, span trace.Span, inputs ...any) ([]any, error) {
@@ -308,20 +369,114 @@ func (op *rerankOperator) run(ctx context.Context, span trace.Span, inputs ...an
 	defer sp.End()
 
 	reducedResults := inputs[0].([]*milvuspb.SearchResults)
-	metrics := inputs[1].([]string)
-	rankInputs := []*milvuspb.SearchResults{}
-	rankMetrics := []string{}
-	for idx, ret := range reducedResults {
-		rankInputs = append(rankInputs, ret)
-		rankMetrics = append(rankMetrics, metrics[idx])
+	inputMetrics := inputs[1].([]string)
+
+	alloc := memory.DefaultAllocator
+
+	// Convert all inputs to DataFrames (including empty results, to preserve metric alignment)
+	dataframes := make([]*chain.DataFrame, 0, len(reducedResults))
+	for _, result := range reducedResults {
+		if result == nil || result.GetResults() == nil {
+			continue
+		}
+		df, err := chain.FromSearchResultData(result.GetResults(), alloc)
+		if err != nil {
+			for _, d := range dataframes {
+				d.Release()
+			}
+			return nil, err
+		}
+		dataframes = append(dataframes, df)
 	}
-	params := rerank.NewSearchParams(op.nq, op.topK, op.offset, op.roundDecimal, op.groupByFieldId,
-		op.groupSize, op.strictGroupSize, op.groupScorerStr, rankMetrics)
-	ret, err := op.functionScore.Process(ctx, params, rankInputs)
+
+	// If no valid results, or all results are empty (zero rows), return empty result directly.
+	// This avoids errors from chain operators that expect field columns (e.g., Decay reranker).
+	allEmpty := len(dataframes) == 0
+	if !allEmpty {
+		allEmpty = true
+		for _, df := range dataframes {
+			if df.NumRows() > 0 {
+				allEmpty = false
+				break
+			}
+		}
+	}
+	if allEmpty {
+		for _, df := range dataframes {
+			df.Release()
+		}
+		return []any{&milvuspb.SearchResults{
+			Status: merr.Success(),
+			Results: &schemapb.SearchResultData{
+				NumQueries:     op.nq,
+				TopK:           op.topK,
+				FieldsData:     make([]*schemapb.FieldData, 0),
+				Scores:         []float32{},
+				Ids:            &schemapb.IDs{},
+				Topks:          make([]int64, op.nq),
+				AllSearchCount: aggregatedAllSearchCount(reducedResults),
+			},
+		}}, nil
+	}
+
+	// Build search params
+	var searchParams *chain.SearchParams
+	if op.groupByFieldName != "" && op.groupSize > 0 {
+		scorer := chain.GroupScorer(op.groupScorerStr)
+		searchParams = chain.NewSearchParamsWithGroupingAndScorer(
+			op.nq, op.topK, op.offset, op.roundDecimal,
+			op.groupByFieldName, op.groupSize, scorer)
+	} else {
+		searchParams = chain.NewSearchParams(op.nq, op.topK, op.offset, op.roundDecimal)
+	}
+	// Build chain
+	if op.rerankMeta == nil {
+		for _, df := range dataframes {
+			df.Release()
+		}
+		return nil, fmt.Errorf("rerank operator: rerankMeta is nil, cannot build rerank chain")
+	}
+	searchParams.ModelExtraInfo = &models.ModelExtraInfo{
+		ClusterID: paramtable.Get().CommonCfg.ClusterPrefix.GetValue(),
+		DBName:    op.dbName,
+	}
+	fc, err := buildChainFromMeta(op.rerankMeta, op.collSchema, inputMetrics, searchParams, alloc)
+	if err != nil {
+		for _, df := range dataframes {
+			df.Release()
+		}
+		return nil, err
+	}
+
+	// Execute chain
+	resultDF, err := fc.ExecuteWithContext(ctx, dataframes...)
+	// Release input dataframes
+	for _, df := range dataframes {
+		df.Release()
+	}
 	if err != nil {
 		return nil, err
 	}
-	return []any{ret}, nil
+
+	// Convert back to SearchResultData
+	var exportOpts *chain.ExportOptions
+	if op.groupByFieldName != "" {
+		exportOpts = &chain.ExportOptions{GroupByField: op.groupByFieldName}
+	}
+	resultData, err := chain.ToSearchResultDataWithOptions(resultDF, exportOpts)
+	resultDF.Release()
+	if err != nil {
+		return nil, err
+	}
+
+	// Aggregate all search count
+	allSearchCount := aggregatedAllSearchCount(reducedResults)
+
+	resultData.AllSearchCount = allSearchCount
+	return []any{&milvuspb.SearchResults{
+		Status:  merr.Success(),
+		Results: resultData,
+	}}, nil
 }
 
 type requeryOperator struct {
@@ -349,8 +504,8 @@ func newRequeryOperator(t *searchTask, _ map[string]any) (operator, error) {
 		return nil, err
 	}
 	outputFieldNames := typeutil.NewSet(t.translatedOutputFields...)
-	if t.SearchRequest.GetIsAdvanced() {
-		outputFieldNames.Insert(t.functionScore.GetAllInputFieldNames()...)
+	if t.SearchRequest.GetIsAdvanced() && t.rerankMeta != nil {
+		outputFieldNames.Insert(t.rerankMeta.GetInputFieldNames()...)
 	}
 	// Union order_by field names with output fields for requery
 	// Use OutputFieldName which is the proper name for requery:
@@ -2090,23 +2245,24 @@ func newBuiltInPipeline(t *searchTask) (*pipeline, error) {
 		return newPipeline(searchWithOrderByPipe, t)
 	}
 
-	if !t.SearchRequest.GetIsAdvanced() && !t.needRequery && t.functionScore == nil {
+	hasRerank := t.rerankMeta != nil
+	if !t.SearchRequest.GetIsAdvanced() && !t.needRequery && !hasRerank {
 		return newPipeline(searchPipe, t)
 	}
-	if !t.SearchRequest.GetIsAdvanced() && t.needRequery && t.functionScore == nil {
+	if !t.SearchRequest.GetIsAdvanced() && t.needRequery && !hasRerank {
 		return newPipeline(searchWithRequeryPipe, t)
 	}
-	if !t.SearchRequest.GetIsAdvanced() && !t.needRequery && t.functionScore != nil {
+	if !t.SearchRequest.GetIsAdvanced() && !t.needRequery && hasRerank {
 		return newPipeline(searchWithRerankPipe, t)
 	}
-	if !t.SearchRequest.GetIsAdvanced() && t.needRequery && t.functionScore != nil {
+	if !t.SearchRequest.GetIsAdvanced() && t.needRequery && hasRerank {
 		return newPipeline(searchWithRerankRequeryPipe, t)
 	}
 	if t.SearchRequest.GetIsAdvanced() && !t.needRequery {
 		return newPipeline(hybridSearchPipe, t)
 	}
 	if t.SearchRequest.GetIsAdvanced() && t.needRequery {
-		if len(t.functionScore.GetAllInputFieldIDs()) > 0 {
+		if t.rerankMeta != nil && len(t.rerankMeta.GetInputFieldIDs()) > 0 {
 			// When the function score need field data, we need to requery to fetch the field data before rerank.
 			// The requery will fetch the field data of all search results,
 			// so there's some memory overhead.

@@ -56,20 +56,22 @@ func parseMaxBatch(maxBatch string) (int, error) {
 	}
 }
 
-type modelProvider interface {
-	rerank(context.Context, string, []string) ([]float32, error)
-	maxBatch() int
+// ModelProvider is the interface for external rerank model services.
+type ModelProvider interface {
+	Rerank(context.Context, string, []string) ([]float32, error)
+	MaxBatch() int
 }
 
 type baseProvider struct {
 	batchSize int
 }
 
-func (provider *baseProvider) maxBatch() int {
+func (provider *baseProvider) MaxBatch() int {
 	return provider.batchSize
 }
 
-func newProvider(params []*commonpb.KeyValuePair, extraInfo *models.ModelExtraInfo) (modelProvider, error) {
+// NewModelProvider creates a ModelProvider from function parameters and extra info.
+func NewModelProvider(params []*commonpb.KeyValuePair, extraInfo *models.ModelExtraInfo) (ModelProvider, error) {
 	for _, param := range params {
 		if strings.ToLower(param.Key) == providerParamName {
 			provider := strings.ToLower(param.Value)
@@ -105,7 +107,7 @@ func newProvider(params []*commonpb.KeyValuePair, extraInfo *models.ModelExtraIn
 type ModelFunction[T PKType] struct {
 	RerankBase
 
-	provider modelProvider
+	provider ModelProvider
 	queries  []string
 }
 
@@ -123,7 +125,7 @@ func newModelFunction(collSchema *schemapb.CollectionSchema, funcSchema *schemap
 		return nil, fmt.Errorf("Rerank model only support varchar, bug got [%s]", base.GetInputFieldTypes()[0].String())
 	}
 
-	provider, err := newProvider(funcSchema.Params, extraInfo)
+	provider, err := NewModelProvider(funcSchema.Params, extraInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -170,12 +172,12 @@ func (model *ModelFunction[T]) processOneSearchData(ctx context.Context, searchP
 		texts = append(texts, text)
 	}
 	scores := make([]float32, 0, len(texts))
-	for i := 0; i < len(texts); i += model.provider.maxBatch() {
-		end := i + model.provider.maxBatch()
+	for i := 0; i < len(texts); i += model.provider.MaxBatch() {
+		end := i + model.provider.MaxBatch()
 		if end > len(texts) {
 			end = len(texts)
 		}
-		newScores, err := model.provider.rerank(ctx, query, texts[i:end])
+		newScores, err := model.provider.Rerank(ctx, query, texts[i:end])
 		if err != nil {
 			return nil, err
 		}

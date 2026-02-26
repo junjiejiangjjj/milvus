@@ -911,7 +911,7 @@ func TestSearchTask_PreExecute(t *testing.T) {
 		enqueueTs := tsoutil.ComposeTSByTime(time.Now(), 0)
 		st.SetTs(enqueueTs)
 		assert.NoError(t, st.PreExecute(ctx))
-		assert.NotNil(t, st.functionScore)
+		assert.NotNil(t, st.rerankMeta)
 		assert.Equal(t, false, st.SearchRequest.GetIsAdvanced())
 	})
 
@@ -933,7 +933,7 @@ func TestSearchTask_PreExecute(t *testing.T) {
 		enqueueTs := tsoutil.ComposeTSByTime(time.Now(), 0)
 		st.SetTs(enqueueTs)
 		assert.NoError(t, st.PreExecute(ctx))
-		assert.NotNil(t, st.functionScore)
+		assert.NotNil(t, st.rerankMeta)
 		assert.Equal(t, true, st.SearchRequest.GetIsAdvanced())
 	})
 
