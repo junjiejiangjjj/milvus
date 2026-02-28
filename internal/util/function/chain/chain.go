@@ -273,9 +273,9 @@ func (fc *FuncChain) Select(columns ...string) *FuncChain {
 	return fc.Add(NewSelectOp(columns))
 }
 
-// Sort sorts the DataFrame by a column.
+// Sort sorts the DataFrame by a column, breaking ties by $id ascending.
 func (fc *FuncChain) Sort(column string, desc bool) *FuncChain {
-	return fc.Add(NewSortOp(column, desc))
+	return fc.Add(NewSortOpWithTieBreak(column, desc, types.IDFieldName))
 }
 
 // Limit limits the number of rows in the DataFrame.

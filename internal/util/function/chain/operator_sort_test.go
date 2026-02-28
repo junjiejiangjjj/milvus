@@ -231,3 +231,54 @@ func (s *SortOpTestSuite) TestSortEmptyChunk() {
 
 	s.Equal(int64(0), result.NumRows())
 }
+
+func (s *SortOpTestSuite) TestSortTieBreakByID() {
+	// All scores are equal (0.5), IDs are 5, 3, 1, 4, 2
+	// After sort descending by score with tie-break by $id ascending:
+	// expected order by ID: 1, 2, 3, 4, 5
+	df := s.createSortTestDF(
+		[]int64{5, 3, 1, 4, 2},
+		[]float64{0.5, 0.5, 0.5, 0.5, 0.5},
+		[]int64{5},
+	)
+	defer df.Release()
+
+	op := NewSortOpWithTieBreak(types.ScoreFieldName, true, types.IDFieldName)
+	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
+	result, err := op.Execute(ctx, df)
+	s.Require().NoError(err)
+	defer result.Release()
+
+	idCol := result.Column(types.IDFieldName)
+	ids := idCol.Chunk(0).(*array.Int64)
+	s.Equal(int64(1), ids.Value(0))
+	s.Equal(int64(2), ids.Value(1))
+	s.Equal(int64(3), ids.Value(2))
+	s.Equal(int64(4), ids.Value(3))
+	s.Equal(int64(5), ids.Value(4))
+}
+
+func (s *SortOpTestSuite) TestSortTieBreakPartialTies() {
+	// Scores: 0.9, 0.5, 0.5, 0.5, 0.1 with IDs: 10, 30, 20, 40, 50
+	// Expected: ID 10 (0.9), then 20, 30, 40 (0.5 sorted by ID asc), then 50 (0.1)
+	df := s.createSortTestDF(
+		[]int64{10, 30, 20, 40, 50},
+		[]float64{0.9, 0.5, 0.5, 0.5, 0.1},
+		[]int64{5},
+	)
+	defer df.Release()
+
+	op := NewSortOpWithTieBreak(types.ScoreFieldName, true, types.IDFieldName)
+	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
+	result, err := op.Execute(ctx, df)
+	s.Require().NoError(err)
+	defer result.Release()
+
+	idCol := result.Column(types.IDFieldName)
+	ids := idCol.Chunk(0).(*array.Int64)
+	s.Equal(int64(10), ids.Value(0)) // score 0.9
+	s.Equal(int64(20), ids.Value(1)) // score 0.5, smallest ID
+	s.Equal(int64(30), ids.Value(2)) // score 0.5
+	s.Equal(int64(40), ids.Value(3)) // score 0.5
+	s.Equal(int64(50), ids.Value(4)) // score 0.1
+}

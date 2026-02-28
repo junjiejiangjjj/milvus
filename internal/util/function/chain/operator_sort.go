@@ -36,9 +36,12 @@ func init() {
 // SortOp sorts the DataFrame by a column.
 // Note: Uses BaseOp.inputs[0] as the sort column name.
 // Each chunk is sorted independently (per-query sorting for search results).
+// When tieBreakCol is set, ties on the primary sort column are broken by that
+// column in ascending order (e.g., sort by $score DESC, then $id ASC).
 type SortOp struct {
 	BaseOp
-	desc bool
+	desc        bool
+	tieBreakCol string // optional: column name for tie-breaking (ascending)
 }
 
 // NewSortOp creates a new SortOp with the given column and sort direction.
@@ -50,6 +53,14 @@ func NewSortOp(column string, desc bool) *SortOp {
 		},
 		desc: desc,
 	}
+}
+
+// NewSortOpWithTieBreak creates a new SortOp that breaks ties using
+// the given column in ascending order.
+func NewSortOpWithTieBreak(column string, desc bool, tieBreakCol string) *SortOp {
+	op := NewSortOp(column, desc)
+	op.tieBreakCol = tieBreakCol
+	return op
 }
 
 // Column returns the sort column name.
@@ -76,6 +87,15 @@ func (o *SortOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame, 
 		return nil, fmt.Errorf("sort_op: column %s has non-comparable type %s", column, sortCol.DataType().Name())
 	}
 
+	// Resolve optional tie-break column
+	var tieBreakCol *arrow.Chunked
+	if o.tieBreakCol != "" {
+		tieBreakCol = input.Column(o.tieBreakCol)
+		if tieBreakCol != nil && !isComparableType(tieBreakCol.DataType()) {
+			tieBreakCol = nil // ignore non-comparable tie-break column
+		}
+	}
+
 	colNames := input.ColumnNames()
 	collector := NewChunkCollector(colNames, input.NumChunks())
 	defer collector.Release()
@@ -87,21 +107,34 @@ func (o *SortOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame, 
 		sortChunk := sortCol.Chunk(chunkIdx)
 		chunkLen := sortChunk.Len()
 
+		// Resolve tie-break chunk for this chunk index
+		var tbChunk arrow.Array
+		if tieBreakCol != nil {
+			tbChunk = tieBreakCol.Chunk(chunkIdx)
+		}
+
 		// Build sort indices
 		indices := make([]int, chunkLen)
 		for i := range chunkLen {
 			indices[i] = i
 		}
 
-		// Sort indices based on values (stable to preserve original order for equal values)
+		// Sort indices based on values, with tie-breaking by ID ascending
 		sort.SliceStable(indices, func(i, j int) bool {
 			vi := indices[i]
 			vj := indices[j]
 			cmp := compareArrayValues(sortChunk, vi, vj)
-			if o.desc {
-				return cmp > 0
+			if cmp != 0 {
+				if o.desc {
+					return cmp > 0
+				}
+				return cmp < 0
 			}
-			return cmp < 0
+			// Tie-break: sort by tie-break column ascending
+			if tbChunk != nil {
+				return compareArrayValues(tbChunk, vi, vj) < 0
+			}
+			return false
 		})
 
 		newChunkSizes[chunkIdx] = int64(chunkLen)
@@ -151,6 +184,9 @@ func (o *SortOp) String() string {
 	order := "ASC"
 	if o.desc {
 		order = "DESC"
+	}
+	if o.tieBreakCol != "" {
+		return fmt.Sprintf("Sort(%s %s, %s ASC)", o.Column(), order, o.tieBreakCol)
 	}
 	return fmt.Sprintf("Sort(%s %s)", o.Column(), order)
 }
@@ -204,6 +240,13 @@ func NewSortOpFromRepr(repr *OperatorRepr) (Operator, error) {
 		if descBool, ok := descVal.(bool); ok {
 			desc = descBool
 		}
+	}
+	tieBreakCol := ""
+	if tbVal, ok := repr.Params["tie_break_col"].(string); ok {
+		tieBreakCol = tbVal
+	}
+	if tieBreakCol != "" {
+		return NewSortOpWithTieBreak(column, desc, tieBreakCol), nil
 	}
 	return NewSortOp(column, desc), nil
 }

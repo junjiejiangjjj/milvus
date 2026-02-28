@@ -1,3 +1,4 @@
+import math
 import time
 import os
 import json
@@ -4873,6 +4874,254 @@ class TestMilvusClientSearchDecayRerank(TestMilvusClientV2Base):
                                  "pk_name": default_primary_key_field_name,
                                  "limit": default_limit}
                     )
+
+    @staticmethod
+    def _gauss_decay(origin, scale, decay, offset, distance):
+        adj = max(0, abs(distance - origin) - offset)
+        sigma_sq = scale ** 2 / math.log(decay)
+        return math.exp(adj ** 2 / sigma_sq)
+
+    @staticmethod
+    def _exp_decay(origin, scale, decay, offset, distance):
+        adj = max(0, abs(distance - origin) - offset)
+        lam = math.log(decay) / scale
+        return math.exp(lam * adj)
+
+    @staticmethod
+    def _linear_decay(origin, scale, decay, offset, distance):
+        adj = max(0, abs(distance - origin) - offset)
+        slope = (1 - decay) / scale
+        return max(decay, 1 - slope * adj)
+
+    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.parametrize("function", ["gauss", "linear", "exp"])
+    @pytest.mark.parametrize("decay", [0.1, 0.5, 0.9])
+    def test_milvus_client_search_reranker_decay_score_ordering(self, function, decay):
+        """
+        target: verify decay reranker produces scores ordered by distance from origin
+        method: insert rows with identical vectors and varying reranker_field values,
+                search with decay reranker, check score ordering matches distance ordering
+        expected: results ordered by distance from origin (closer = higher score), all scores > 0
+        """
+        client = self._client()
+        collection_name = cf.gen_collection_name_by_testcase_name()
+        dim = 5
+        # 1. create collection
+        schema = self.create_schema(client, enable_dynamic_field=False)[0]
+        schema.add_field(default_primary_key_field_name, DataType.INT64, is_primary=True, auto_id=False)
+        schema.add_field(default_vector_field_name, DataType.FLOAT_VECTOR, dim=dim)
+        schema.add_field(ct.default_reranker_field_name, DataType.FLOAT, nullable=False)
+        index_params = self.prepare_index_params(client)[0]
+        index_params.add_index(default_vector_field_name, metric_type="COSINE")
+        self.create_collection(client, collection_name, dimension=dim, schema=schema, index_params=index_params)
+        # 2. insert rows with identical vectors but different reranker_field values
+        fixed_vector = [0.5] * dim
+        field_values = [0, 10, 50, 100, 200, 500]
+        rows = [{default_primary_key_field_name: i,
+                 default_vector_field_name: fixed_vector,
+                 ct.default_reranker_field_name: np.float32(field_values[i])}
+                for i in range(len(field_values))]
+        self.insert(client, collection_name, rows)
+        self.flush(client, collection_name)
+        # 3. search with decay reranker
+        my_rerank_fn = Function(
+            name="my_reranker",
+            input_field_names=[ct.default_reranker_field_name],
+            function_type=FunctionType.RERANK,
+            params={
+                "reranker": "decay",
+                "function": function,
+                "origin": 0,
+                "offset": 0,
+                "decay": decay,
+                "scale": 100
+            }
+        )
+        vectors_to_search = [fixed_vector]
+        res = self.search(client, collection_name, vectors_to_search, limit=len(field_values),
+                          ranker=my_rerank_fn,
+                          output_fields=[ct.default_reranker_field_name])[0]
+        # 4. verify score ordering: closer to origin should have higher score
+        results = res[0]
+        assert len(results) == len(field_values), \
+            f"Expected {len(field_values)} results, got {len(results)}"
+        scores = [r["distance"] for r in results]
+        reranker_values = [r[ct.default_reranker_field_name] for r in results]
+        log.info(f"function={function}, decay={decay}, scores={scores}, reranker_values={reranker_values}")
+        # All scores must be positive
+        for i, score in enumerate(scores):
+            assert score > 0, f"Score at position {i} should be > 0, got {score}"
+        # Scores must be in descending order (higher score first)
+        for i in range(len(scores) - 1):
+            assert scores[i] >= scores[i + 1], \
+                f"Scores not in descending order: scores[{i}]={scores[i]} < scores[{i + 1}]={scores[i + 1]}"
+        # Distance from origin must be in ascending order (closer first)
+        distances = [abs(v) for v in reranker_values]
+        for i in range(len(distances) - 1):
+            assert distances[i] <= distances[i + 1], \
+                f"Distances not in ascending order: dist[{i}]={distances[i]} > dist[{i + 1}]={distances[i + 1]}"
+
+    @pytest.mark.tags(CaseLabel.L1)
+    @pytest.mark.parametrize("function", ["gauss", "linear", "exp"])
+    def test_milvus_client_search_reranker_decay_score_ratio(self, function):
+        """
+        target: verify decay reranker produces mathematically correct score ratios
+        method: insert rows with identical vectors at known distances, search with decay reranker,
+                compare actual score ratios against Python-computed expected ratios
+        expected: score ratios match expected decay function ratios within tolerance
+        """
+        client = self._client()
+        collection_name = cf.gen_collection_name_by_testcase_name()
+        dim = 5
+        # 1. create collection
+        schema = self.create_schema(client, enable_dynamic_field=False)[0]
+        schema.add_field(default_primary_key_field_name, DataType.INT64, is_primary=True, auto_id=False)
+        schema.add_field(default_vector_field_name, DataType.FLOAT_VECTOR, dim=dim)
+        schema.add_field(ct.default_reranker_field_name, DataType.FLOAT, nullable=False)
+        index_params = self.prepare_index_params(client)[0]
+        index_params.add_index(default_vector_field_name, metric_type="COSINE")
+        self.create_collection(client, collection_name, dimension=dim, schema=schema, index_params=index_params)
+        # 2. insert rows with identical vectors at specific distances
+        fixed_vector = [0.5] * dim
+        origin = 0
+        scale = 100
+        decay_param = 0.5
+        offset = 0
+        field_values = [0, 25, 50, 75, 100]
+        rows = [{default_primary_key_field_name: i,
+                 default_vector_field_name: fixed_vector,
+                 ct.default_reranker_field_name: np.float32(field_values[i])}
+                for i in range(len(field_values))]
+        self.insert(client, collection_name, rows)
+        self.flush(client, collection_name)
+        # 3. search with decay reranker
+        my_rerank_fn = Function(
+            name="my_reranker",
+            input_field_names=[ct.default_reranker_field_name],
+            function_type=FunctionType.RERANK,
+            params={
+                "reranker": "decay",
+                "function": function,
+                "origin": origin,
+                "offset": offset,
+                "decay": decay_param,
+                "scale": scale
+            }
+        )
+        vectors_to_search = [fixed_vector]
+        res = self.search(client, collection_name, vectors_to_search, limit=len(field_values),
+                          ranker=my_rerank_fn,
+                          output_fields=[ct.default_reranker_field_name])[0]
+        # 4. build mapping from reranker_field value to actual score
+        results = res[0]
+        assert len(results) == len(field_values), \
+            f"Expected {len(field_values)} results, got {len(results)}"
+        actual_scores = {}
+        for r in results:
+            actual_scores[r[ct.default_reranker_field_name]] = r["distance"]
+        # 5. compute expected decay scores using Python formulas
+        decay_funcs = {"gauss": self._gauss_decay, "linear": self._linear_decay, "exp": self._exp_decay}
+        decay_fn = decay_funcs[function]
+        expected_scores = {}
+        for v in field_values:
+            expected_scores[v] = decay_fn(origin, scale, decay_param, offset, v)
+        log.info(f"function={function}, actual_scores={actual_scores}, expected_scores={expected_scores}")
+        # 6. verify score ratios match expected ratios
+        # Use distance=0 as reference point (decay score = 1.0, so actual score = base_score)
+        ref_value = 0
+        ref_actual = actual_scores[ref_value]
+        ref_expected = expected_scores[ref_value]
+        epsilon = 0.01
+        for v in field_values:
+            if v == ref_value:
+                continue
+            actual_ratio = actual_scores[v] / ref_actual
+            expected_ratio = expected_scores[v] / ref_expected
+            log.info(f"  distance={v}: actual_ratio={actual_ratio:.6f}, expected_ratio={expected_ratio:.6f}")
+            assert abs(actual_ratio - expected_ratio) < epsilon, \
+                f"Score ratio mismatch for distance={v}: actual_ratio={actual_ratio:.6f}, " \
+                f"expected_ratio={expected_ratio:.6f}, diff={abs(actual_ratio - expected_ratio):.6f}"
+        # 7. additionally verify that score at distance=scale equals decay * score at origin
+        if scale in actual_scores:
+            actual_decay_at_scale = actual_scores[scale] / actual_scores[ref_value]
+            assert abs(actual_decay_at_scale - decay_param) < epsilon, \
+                f"At distance=scale, expected decay≈{decay_param}, got {actual_decay_at_scale:.6f}"
+
+    @pytest.mark.tags(CaseLabel.L1)
+    def test_milvus_client_search_reranker_decay_offset_effect(self):
+        """
+        target: verify decay reranker offset parameter works correctly
+        method: insert rows with identical vectors at various distances, search with decay reranker
+                using offset=10, verify items within offset zone have equal scores and items beyond
+                have decreasing scores
+        expected: items at distance <= offset have same score (decay=1.0), items beyond offset have
+                  strictly decreasing scores
+        """
+        client = self._client()
+        collection_name = cf.gen_collection_name_by_testcase_name()
+        dim = 5
+        # 1. create collection
+        schema = self.create_schema(client, enable_dynamic_field=False)[0]
+        schema.add_field(default_primary_key_field_name, DataType.INT64, is_primary=True, auto_id=False)
+        schema.add_field(default_vector_field_name, DataType.FLOAT_VECTOR, dim=dim)
+        schema.add_field(ct.default_reranker_field_name, DataType.FLOAT, nullable=False)
+        index_params = self.prepare_index_params(client)[0]
+        index_params.add_index(default_vector_field_name, metric_type="COSINE")
+        self.create_collection(client, collection_name, dimension=dim, schema=schema, index_params=index_params)
+        # 2. insert rows with identical vectors
+        fixed_vector = [0.5] * dim
+        field_values = [0, 5, 10, 15, 50, 100]
+        rows = [{default_primary_key_field_name: i,
+                 default_vector_field_name: fixed_vector,
+                 ct.default_reranker_field_name: np.float32(field_values[i])}
+                for i in range(len(field_values))]
+        self.insert(client, collection_name, rows)
+        self.flush(client, collection_name)
+        # 3. search with decay reranker using offset=10
+        my_rerank_fn = Function(
+            name="my_reranker",
+            input_field_names=[ct.default_reranker_field_name],
+            function_type=FunctionType.RERANK,
+            params={
+                "reranker": "decay",
+                "function": "gauss",
+                "origin": 0,
+                "offset": 10,
+                "decay": 0.5,
+                "scale": 100
+            }
+        )
+        vectors_to_search = [fixed_vector]
+        res = self.search(client, collection_name, vectors_to_search, limit=len(field_values),
+                          ranker=my_rerank_fn,
+                          output_fields=[ct.default_reranker_field_name])[0]
+        # 4. build mapping from reranker_field value to actual score
+        results = res[0]
+        assert len(results) == len(field_values), \
+            f"Expected {len(field_values)} results, got {len(results)}"
+        score_map = {}
+        for r in results:
+            score_map[r[ct.default_reranker_field_name]] = r["distance"]
+        log.info(f"offset_test score_map={score_map}")
+        # 5. verify items within offset zone (distance <= 10) have the same score
+        within_offset = [0, 5, 10]
+        epsilon = 1e-4
+        ref_score = score_map[within_offset[0]]
+        for v in within_offset:
+            assert abs(score_map[v] - ref_score) < epsilon, \
+                f"Items within offset should have equal scores: score({v})={score_map[v]}, " \
+                f"score({within_offset[0]})={ref_score}"
+        # 6. verify items beyond offset have strictly decreasing scores
+        beyond_offset = [15, 50, 100]
+        # Items within offset should have higher score than items beyond offset
+        for v in beyond_offset:
+            assert score_map[v] < ref_score, \
+                f"Score beyond offset should be < offset zone score: score({v})={score_map[v]}, ref={ref_score}"
+        # Items beyond offset should be in strictly decreasing order by distance
+        for i in range(len(beyond_offset) - 1):
+            assert score_map[beyond_offset[i]] > score_map[beyond_offset[i + 1]], \
+                f"Scores beyond offset not decreasing: score({beyond_offset[i]})={score_map[beyond_offset[i]]} " \
+                f"<= score({beyond_offset[i + 1]})={score_map[beyond_offset[i + 1]]}"
 
 
 class TestMilvusClientSearchModelRerank(TestMilvusClientV2Base):
