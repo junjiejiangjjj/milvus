@@ -626,7 +626,7 @@ func (s *LocalSegment) Search(ctx context.Context, searchReq *segcore.SearchRequ
 		log.Warn("Search failed")
 		return nil, err
 	}
-	metrics.QueryNodeSQSegmentLatencyInCore.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel).Observe(float64(tr.ElapseSpan().Milliseconds()))
+	metrics.QueryNodeSQSegmentLatencyInCore.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()), metrics.SearchLabel).Observe(float64(tr.ElapseSpan().Microseconds()) / 1000.0)
 	log.Debug("search segment done")
 	return result, nil
 }
@@ -647,7 +647,7 @@ func (s *LocalSegment) retrieve(ctx context.Context, plan *segcore.RetrievePlan,
 		return nil, err
 	}
 	metrics.QueryNodeSQSegmentLatencyInCore.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
-		metrics.QueryLabel).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.QueryLabel).Observe(float64(tr.ElapseSpan().Microseconds()) / 1000.0)
 	return result, nil
 }
 
@@ -693,7 +693,7 @@ func (s *LocalSegment) retrieveByOffsets(ctx context.Context, plan *segcore.Retr
 		return nil, err
 	}
 	metrics.QueryNodeSQSegmentLatencyInCore.WithLabelValues(fmt.Sprint(paramtable.GetNodeID()),
-		metrics.QueryLabel).Observe(float64(tr.ElapseSpan().Milliseconds()))
+		metrics.QueryLabel).Observe(float64(tr.ElapseSpan().Microseconds()) / 1000.0)
 	return result, nil
 }
 
@@ -742,7 +742,7 @@ func (s *LocalSegment) Insert(ctx context.Context, rowIDs []int64, timestamps []
 				fmt.Sprint(paramtable.GetNodeID()),
 				"Insert",
 				"Sync",
-			).Observe(float64(time.Since(start).Milliseconds()))
+			).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		}()
 
 		result, err = s.csegment.Insert(ctx, &segcore.InsertRequest{
@@ -798,7 +798,7 @@ func (s *LocalSegment) Delete(ctx context.Context, primaryKeys storage.PrimaryKe
 				fmt.Sprint(paramtable.GetNodeID()),
 				"Delete",
 				"Sync",
-			).Observe(float64(time.Since(start).Milliseconds()))
+			).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		}()
 		_, err = s.csegment.Delete(ctx, &segcore.DeleteRequest{
 			PrimaryKeys: primaryKeys,
@@ -861,7 +861,7 @@ func (s *LocalSegment) LoadFieldData(ctx context.Context, fieldID int64, rowCoun
 				fmt.Sprint(paramtable.GetNodeID()),
 				"LoadFieldData",
 				"Sync",
-			).Observe(float64(time.Since(start).Milliseconds()))
+			).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		}()
 		_, err = s.csegment.LoadFieldData(ctx, req)
 		log.Info("submitted loadFieldData task to load pool")
@@ -967,7 +967,7 @@ func (s *LocalSegment) LoadDeltaData(ctx context.Context, deltaData *storage.Del
 				fmt.Sprint(paramtable.GetNodeID()),
 				"LoadDeletedRecord",
 				"Sync",
-			).Observe(float64(time.Since(start).Milliseconds()))
+			).Observe(float64(time.Since(start).Microseconds()) / 1000.0)
 		}()
 		status = C.LoadDeletedRecord(s.ptr, loadInfo)
 		return nil, nil
