@@ -60,7 +60,6 @@
 #include "query/SubSearchResult.h"
 #include "query/helper.h"
 #include "segcore/ReduceStructure.h"
-#include "segcore/reduce/Reduce.h"
 #include "storage/FileManager.h"
 #include "storage/ThreadPools.h"
 #include "storage/Types.h"

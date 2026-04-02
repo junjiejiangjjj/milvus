@@ -13,14 +13,12 @@ import (
 	"github.com/samber/lo"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
-	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/milvus-io/milvus-proto/go-api/v2/commonpb"
 	"github.com/milvus-io/milvus/internal/querynodev2/segments"
 	"github.com/milvus-io/milvus/internal/util/searchutil/scheduler"
 	"github.com/milvus-io/milvus/internal/util/segcore"
-	"github.com/milvus-io/milvus/pkg/v2/log"
 	"github.com/milvus-io/milvus/pkg/v2/metrics"
 	"github.com/milvus-io/milvus/pkg/v2/proto/internalpb"
 	"github.com/milvus-io/milvus/pkg/v2/proto/planpb"
@@ -96,6 +94,15 @@ func (t *SearchTask) GetNodeID() int64 {
 	return t.serverID
 }
 
+// subTaskAt returns the i-th sub-task: the receiver itself for i==0,
+// otherwise t.others[i-1]. Sub-tasks index in lock-step with originNqs.
+func (t *SearchTask) subTaskAt(i int) *SearchTask {
+	if i == 0 {
+		return t
+	}
+	return t.others[i-1]
+}
+
 func (t *SearchTask) IsGpuIndex() bool {
 	return t.collection.IsGpuIndex()
 }
@@ -140,11 +147,6 @@ func (t *SearchTask) PreExecute() error {
 }
 
 func (t *SearchTask) Execute() error {
-	log := log.Ctx(t.ctx).With(
-		zap.Int64("collectionID", t.collection.ID()),
-		zap.String("shard", t.req.GetDmlChannels()[0]),
-	)
-
 	if t.scheduleSpan != nil {
 		t.scheduleSpan.End()
 	}
@@ -197,12 +199,7 @@ func (t *SearchTask) Execute() error {
 
 	if len(results) == 0 {
 		for i := range t.originNqs {
-			var task *SearchTask
-			if i == 0 {
-				task = t
-			} else {
-				task = t.others[i-1]
-			}
+			task := t.subTaskAt(i)
 
 			task.result = &internalpb.SearchResults{
 				Base: &commonpb.MsgBase{
@@ -226,64 +223,26 @@ func (t *SearchTask) Execute() error {
 		return acc + segments.GetSegmentRelatedDataSize(seg)
 	}, 0)
 
-	tr.RecordSpan()
-	blobs, err := segcore.ReduceSearchResultsAndFillData(
-		t.ctx,
-		searchReq.Plan(),
-		results,
-		int64(len(results)),
-		t.originNqs,
-		t.originTopks,
-	)
+	tr.RecordSpan() // consume search latency so reduce metric is pure reduce time
+
+	// Export per-segment results as Arrow DataFrames
+	// TODO: extract extra field IDs from L0 rerank scorer filters when rerank is configured
+	segDFs, err := t.exportSearchResultsAsArrow(results, searchReq.Plan(), nil)
 	if err != nil {
-		log.Warn("failed to reduce search results", zap.Error(err))
 		return err
 	}
-	defer segcore.DeleteSearchResultDataBlobs(blobs)
-	metrics.QueryNodeReduceLatency.WithLabelValues(
-		fmt.Sprint(t.GetNodeID()),
-		metrics.SearchLabel,
-		metrics.ReduceSegments,
-		metrics.BatchReduce).
-		Observe(float64(tr.RecordSpan().Milliseconds()))
-	for i := range t.originNqs {
-		blob, cost, err := segcore.GetSearchResultDataBlob(t.ctx, blobs, i)
-		if err != nil {
-			return err
+	defer func() {
+		for _, df := range segDFs {
+			if df != nil {
+				df.Release()
+			}
 		}
+	}()
 
-		var task *SearchTask
-		if i == 0 {
-			task = t
-		} else {
-			task = t.others[i-1]
-		}
+	// TODO: if L0 rerank is configured, run rerank chain on segDFs here
+	// segDFs = l0RerankChain.Execute(segDFs)
 
-		// Note: blob is unsafe because get from C
-		bs := make([]byte, len(blob))
-		copy(bs, blob)
-
-		task.result = &internalpb.SearchResults{
-			Base: &commonpb.MsgBase{
-				SourceID: t.GetNodeID(),
-			},
-			Status:         merr.Success(),
-			MetricType:     metricType,
-			NumQueries:     t.originNqs[i],
-			TopK:           t.originTopks[i],
-			SlicedBlob:     bs,
-			SlicedOffset:   1,
-			SlicedNumCount: 1,
-			CostAggregation: &internalpb.CostAggregation{
-				ServiceTime:          tr.ElapseSpan().Milliseconds(),
-				TotalRelatedDataSize: relatedDataSize,
-			},
-			ScannedRemoteBytes: cost.ScannedRemoteBytes,
-			ScannedTotalBytes:  cost.ScannedTotalBytes,
-		}
-	}
-
-	return nil
+	return t.executeGoReduce(segDFs, results, searchReq, metricType, tr, relatedDataSize)
 }
 
 func (t *SearchTask) Merge(other *SearchTask) bool {

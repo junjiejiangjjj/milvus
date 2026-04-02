@@ -1077,59 +1077,95 @@ func genHNSWDSL(schema *schemapb.CollectionSchema, ef int, topK int64, roundDeci
             >`, nil
 }
 
-func CheckSearchResult(ctx context.Context, nq int64, plan *segcore.SearchPlan, searchResult *segcore.SearchResult) error {
-	searchResults := make([]*segcore.SearchResult, 0)
-	searchResults = append(searchResults, searchResult)
-
-	topK := plan.GetTopK()
-	sliceNQs := []int64{nq / 5, nq / 5, nq / 5, nq / 5, nq / 5}
-	sliceTopKs := []int64{topK, topK / 2, topK, topK, topK / 2}
-	sInfo := segcore.ParseSliceInfo(sliceNQs, sliceTopKs, nq)
-
-	res, err := segcore.ReduceSearchResultsAndFillData(ctx, plan, searchResults, 1, sInfo.SliceNQs, sInfo.SliceTopKs)
-	if err != nil {
-		return err
-	}
-
-	for i := 0; i < len(sInfo.SliceNQs); i++ {
-		blob, _, err := segcore.GetSearchResultDataBlob(ctx, res, i)
-		if err != nil {
-			return err
-		}
-		if len(blob) == 0 {
-			return errors.New("wrong search result data blobs when checkSearchResult")
-		}
-
-		result := &schemapb.SearchResultData{}
-		err = proto.Unmarshal(blob, result)
-		if err != nil {
-			return err
-		}
-
-		if result.TopK != sliceTopKs[i] {
-			return errors.New("unexpected topK when checkSearchResult")
-		}
-		if result.NumQueries != sInfo.SliceNQs[i] {
-			return errors.New("unexpected nq when checkSearchResult")
-		}
-		// search empty segment, return empty result.IDs
-		if len(result.Ids.IdField.(*schemapb.IDs_IntId).IntId.Data) <= 0 {
-			return errors.New("unexpected Ids when checkSearchResult")
-		}
-		if len(result.Scores) <= 0 {
-			return errors.New("unexpected Scores when checkSearchResult")
-		}
-	}
-
-	for _, searchResult := range searchResults {
-		searchResult.Release()
-	}
-	segcore.DeleteSearchResultDataBlobs(res)
-	return nil
-}
-
 func GenSearchPlanAndRequests(collection *segcore.CCollection, segments []int64, indexType string, nq int64) (*segcore.SearchRequest, error) {
 	iReq, _ := genSearchRequest(nq, indexType, collection)
+	queryReq := &querypb.SearchRequest{
+		Req:         iReq,
+		DmlChannels: []string{fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collection.ID())},
+		SegmentIDs:  segments,
+		Scope:       querypb.DataScope_Historical,
+	}
+	return segcore.NewSearchRequest(collection, queryReq, queryReq.Req.GetPlaceholderGroup())
+}
+
+// GenSearchPlanAndRequestsWithTopK creates a search request with custom topK.
+func GenSearchPlanAndRequestsWithTopK(collection *segcore.CCollection, segments []int64, nq, topK int64) (*segcore.SearchRequest, error) {
+	return genSearchRequestWithOptions(collection, segments, nq, topK, nil)
+}
+
+// GenSearchPlanAndRequestsWithOutputFields creates a search request with custom topK and output fields.
+func GenSearchPlanAndRequestsWithOutputFields(collection *segcore.CCollection, segments []int64, nq, topK int64, outputFieldIDs []int64) (*segcore.SearchRequest, error) {
+	return genSearchRequestWithOptions(collection, segments, nq, topK, outputFieldIDs)
+}
+
+// GenSearchPlanAndRequestsWithGroupBy creates a search request with group-by enabled.
+// groupByFieldID is the scalar field to group by; groupSize is the per-group limit.
+func GenSearchPlanAndRequestsWithGroupBy(
+	collection *segcore.CCollection,
+	segments []int64,
+	nq, topK int64,
+	groupByFieldID int64,
+	groupSize int64,
+) (*segcore.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	var planNode planpb.PlanNode
+	if err := prototext.Unmarshal([]byte(planStr), &planNode); err != nil {
+		return nil, err
+	}
+	// genBruteForceDSL always emits a vector_anns plan, so VectorAnns/QueryInfo
+	// are non-nil here. If genBruteForceDSL ever changes to emit a different
+	// plan shape this will start panicking — keep them in sync.
+	planNode.GetVectorAnns().QueryInfo.GroupByFieldId = groupByFieldID
+	planNode.GetVectorAnns().QueryInfo.GroupSize = groupSize
+	return buildSearchRequestFromPlanNode(collection, segments, nq, &planNode)
+}
+
+func genSearchRequestWithOptions(collection *segcore.CCollection, segments []int64, nq, topK int64, outputFieldIDs []int64) (*segcore.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	var planNode planpb.PlanNode
+	if err := prototext.Unmarshal([]byte(planStr), &planNode); err != nil {
+		return nil, err
+	}
+	if len(outputFieldIDs) > 0 {
+		planNode.OutputFieldIds = outputFieldIDs
+	}
+	return buildSearchRequestFromPlanNode(collection, segments, nq, &planNode)
+}
+
+// buildSearchRequestFromPlanNode marshals the plan and wraps it in the
+// internalpb / querypb envelope shared by every test variant.
+func buildSearchRequestFromPlanNode(
+	collection *segcore.CCollection,
+	segments []int64,
+	nq int64,
+	planNode *planpb.PlanNode,
+) (*segcore.SearchRequest, error) {
+	placeHolder, err := genPlaceHolderGroup(nq)
+	if err != nil {
+		return nil, err
+	}
+	serializedPlan, err := proto.Marshal(planNode)
+	if err != nil {
+		return nil, err
+	}
+	iReq := &internalpb.SearchRequest{
+		Base:               genCommonMsgBase(commonpb.MsgType_Search, 0),
+		CollectionID:       collection.ID(),
+		PlaceholderGroup:   placeHolder,
+		SerializedExprPlan: serializedPlan,
+		DslType:            commonpb.DslType_BoolExprV1,
+		Nq:                 nq,
+		// Use MaxTimestamp so all inserted rows are visible to the search.
+		// Mock-inserted rows have timestamps starting from 1; the default 0
+		// would make every row invisible.
+		MvccTimestamp: typeutil.MaxTimestamp,
+	}
 	queryReq := &querypb.SearchRequest{
 		Req:         iReq,
 		DmlChannels: []string{fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collection.ID())},

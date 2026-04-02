@@ -1,0 +1,127 @@
+/*
+ * Licensed to the LF AI & Data foundation under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License. You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package tasks
+
+import (
+	"testing"
+
+	"github.com/apache/arrow/go/v17/arrow/memory"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestMarshalReduceResult_Basic(t *testing.T) {
+	pool := memory.NewGoAllocator()
+
+	// Build a simple mergeResult with 2 NQs
+	// NQ0: 3 results, NQ1: 2 results
+	df := buildTestDF(pool,
+		[][]int64{{1, 2, 3}, {4, 5}},
+		[][]float32{{0.9, 0.8, 0.7}, {0.6, 0.5}},
+	)
+	defer df.Release()
+
+	result := &mergeResult{
+		DF: df,
+		Sources: [][]segmentSource{
+			{{InputIdx: 0, SegOffset: 10}, {InputIdx: 0, SegOffset: 20}, {InputIdx: 1, SegOffset: 30}},
+			{{InputIdx: 0, SegOffset: 40}, {InputIdx: 1, SegOffset: 50}},
+		},
+	}
+
+	data, err := marshalReduceResult(result)
+	require.NoError(t, err)
+
+	// Verify structure
+	assert.Equal(t, int64(2), data.NumQueries)
+	assert.Equal(t, int64(3), data.TopK) // max of 3, 2
+	assert.Equal(t, []int64{3, 2}, data.Topks)
+
+	// Verify IDs
+	require.NotNil(t, data.Ids.GetIntId())
+	assert.Equal(t, []int64{1, 2, 3, 4, 5}, data.Ids.GetIntId().Data)
+
+	// Verify Scores
+	assert.Len(t, data.Scores, 5)
+	assert.InDelta(t, float32(0.9), data.Scores[0], 0.001)
+	assert.InDelta(t, float32(0.5), data.Scores[4], 0.001)
+}
+
+func TestMarshalReduceResult_Empty(t *testing.T) {
+	pool := memory.NewGoAllocator()
+
+	df := buildTestDF(pool, [][]int64{{}}, [][]float32{{}})
+	defer df.Release()
+
+	result := &mergeResult{
+		DF:      df,
+		Sources: [][]segmentSource{{}},
+	}
+
+	data, err := marshalReduceResult(result)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), data.NumQueries)
+	assert.Equal(t, int64(0), data.TopK)
+	assert.Len(t, data.Scores, 0)
+}
+
+func TestMarshalReduceResult_Nil(t *testing.T) {
+	_, err := marshalReduceResult(nil)
+	assert.Error(t, err)
+}
+
+// TestMarshalReduceResult_GroupBy verifies the $group_by column from the merged
+// DataFrame is exported to SearchResultData.GroupByFieldValue. The proxy reduces
+// across shards by reading this field; dropping it (the bug we just fixed)
+// silently breaks group-by queries through the Go-reduce path.
+func TestMarshalReduceResult_GroupBy(t *testing.T) {
+	pool := memory.NewGoAllocator()
+
+	// 2 NQs, each with two group-by buckets
+	df := buildTestDFWithGroupBy(pool,
+		[][]int64{{1, 2, 3}, {4, 5}},
+		[][]float32{{0.9, 0.8, 0.7}, {0.6, 0.5}},
+		[][]int64{{10, 10, 20}, {30, 30}},
+		groupByCol)
+	defer df.Release()
+
+	result := &mergeResult{
+		DF: df,
+		Sources: [][]segmentSource{
+			{{InputIdx: 0}, {InputIdx: 0}, {InputIdx: 0}},
+			{{InputIdx: 0}, {InputIdx: 0}},
+		},
+	}
+
+	data, err := marshalReduceResult(result)
+	require.NoError(t, err)
+
+	require.NotNil(t, data.GroupByFieldValue, "GroupByFieldValue must be set when $group_by exists")
+	gbInts := data.GroupByFieldValue.GetScalars().GetLongData().GetData()
+	assert.Equal(t, []int64{10, 10, 20, 30, 30}, gbInts)
+	// FieldName must be empty so proxy.fillFieldNames can resolve the real
+	// schema field name from FieldId. Leaking the internal "$group_by"
+	// column name to the user is wrong.
+	assert.Empty(t, data.GroupByFieldValue.FieldName,
+		"FieldName must be empty so proxy auto-fills the real name from FieldId")
+	// Sanity: $group_by must NOT be exported as a regular field.
+	for _, fd := range data.FieldsData {
+		assert.NotEqual(t, groupByCol, fd.FieldName, "$group_by leaked into FieldsData")
+	}
+}

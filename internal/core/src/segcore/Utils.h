@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "common/FieldData.h"
+#include "common/QueryResult.h"
 #include "common/type_c.h"
 #include "common/Types.h"
 #include "index/Index.h"
@@ -265,5 +266,15 @@ CheckCancellation(milvus::OpContext* op_ctx,
                                        field_id));
     }
 }
+
+// SortEqualScoresByPks normalizes the in-segment ordering by stable-sorting
+// equal-score runs by PK ASC, in place. The C++ search engine returns rows in
+// score DESC order but with undefined PK order within equal-score runs; the
+// Go reduce path requires a deterministic order so PK dedup picks the same
+// row across runs. Operates on seg_offsets_, distances_, primary_keys_, and
+// (if present) element_indices_ and group_by_values_, using an in-place
+// cyclic permutation.
+void
+SortEqualScoresByPks(SearchResult* search_result);
 
 }  // namespace milvus::segcore

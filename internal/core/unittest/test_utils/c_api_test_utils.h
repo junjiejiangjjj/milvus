@@ -28,8 +28,6 @@
 #include "index/IndexFactory.h"
 #include "pb/plan.pb.h"
 #include "segcore/Collection.h"
-#include "segcore/reduce/Reduce.h"
-#include "segcore/reduce_c.h"
 #include "segcore/segment_c.h"
 #include "segcore/Types.h"
 #include "futures/Future.h"
