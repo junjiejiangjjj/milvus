@@ -1139,6 +1139,57 @@ func GenSearchPlanAndRequests(collection *segcore.CCollection, segments []int64,
 	return segcore.NewSearchRequest(collection, queryReq, queryReq.Req.GetPlaceholderGroup())
 }
 
+// GenSearchPlanAndRequestsWithTopK creates a search request with custom topK.
+func GenSearchPlanAndRequestsWithTopK(collection *segcore.CCollection, segments []int64, nq, topK int64) (*segcore.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	return genSearchRequestFromPlan(collection, segments, nq, planStr, nil)
+}
+
+// GenSearchPlanAndRequestsWithOutputFields creates a search request with custom topK and output fields.
+func GenSearchPlanAndRequestsWithOutputFields(collection *segcore.CCollection, segments []int64, nq, topK int64, outputFieldIDs []int64) (*segcore.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	return genSearchRequestFromPlan(collection, segments, nq, planStr, outputFieldIDs)
+}
+
+func genSearchRequestFromPlan(collection *segcore.CCollection, segments []int64, nq int64, planStr string, outputFieldIDs []int64) (*segcore.SearchRequest, error) {
+	placeHolder, err := genPlaceHolderGroup(nq)
+	if err != nil {
+		return nil, err
+	}
+	var planNode planpb.PlanNode
+	if err := prototext.Unmarshal([]byte(planStr), &planNode); err != nil {
+		return nil, err
+	}
+	if len(outputFieldIDs) > 0 {
+		planNode.OutputFieldIds = outputFieldIDs
+	}
+	serializedPlan, err := proto.Marshal(&planNode)
+	if err != nil {
+		return nil, err
+	}
+	iReq := &internalpb.SearchRequest{
+		Base:               genCommonMsgBase(commonpb.MsgType_Search, 0),
+		CollectionID:       collection.ID(),
+		PlaceholderGroup:   placeHolder,
+		SerializedExprPlan: serializedPlan,
+		DslType:            commonpb.DslType_BoolExprV1,
+		Nq:                 nq,
+	}
+	queryReq := &querypb.SearchRequest{
+		Req:         iReq,
+		DmlChannels: []string{fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collection.ID())},
+		SegmentIDs:  segments,
+		Scope:       querypb.DataScope_Historical,
+	}
+	return segcore.NewSearchRequest(collection, queryReq, queryReq.Req.GetPlaceholderGroup())
+}
+
 func GenInsertMsg(collection *segcore.CCollection, partitionID, segment int64, numRows int) (*msgstream.InsertMsg, error) {
 	fieldsData := make([]*schemapb.FieldData, 0)
 
