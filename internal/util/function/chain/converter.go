@@ -601,6 +601,11 @@ type ExportOptions struct {
 	// GroupByField specifies which column should be exported as GroupByFieldValue
 	// instead of being included in FieldsData. Empty means no group-by column.
 	GroupByField string
+	// SkipColumns lists column names to omit from FieldsData. Columns with
+	// segment-specific semantics (e.g., $element_indices) are exported by the
+	// caller after this generic conversion; listing them here prevents them
+	// from leaking into FieldsData as if they were schema fields.
+	SkipColumns []string
 }
 
 // ToSearchResultData exports the DataFrame to SearchResultData.
@@ -639,13 +644,23 @@ func ToSearchResultDataWithOptions(df *DataFrame, opts *ExportOptions) (*schemap
 
 	// Determine which columns to skip or export specially
 	groupByField := ""
+	var skipSet map[string]struct{}
 	if opts != nil {
 		groupByField = opts.GroupByField
+		if len(opts.SkipColumns) > 0 {
+			skipSet = make(map[string]struct{}, len(opts.SkipColumns))
+			for _, name := range opts.SkipColumns {
+				skipSet[name] = struct{}{}
+			}
+		}
 	}
 
 	// Export other fields
 	for _, name := range df.ColumnNames() {
 		if name == types.IDFieldName || name == types.ScoreFieldName || name == GroupScoreFieldName {
+			continue
+		}
+		if _, ok := skipSet[name]; ok {
 			continue
 		}
 

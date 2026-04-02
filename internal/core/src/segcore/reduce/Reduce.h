@@ -62,6 +62,16 @@ class ReduceHelper {
     void
     Reduce();
 
+    // PreReduce runs only the pre-merge phase of Reduce: filter invalid rows,
+    // optionally apply Global Refine (truncate + refine), and fill primary
+    // keys. Used by the Go-based reduce pipeline (qn-reduce), which replaces
+    // the subsequent k-way merge / marshal steps with a Go implementation.
+    //
+    // Reduce() == PreReduce() + SortEqualScoresByPks + ReduceResultData +
+    // RefreshSearchResults + FillEntryData + GetTotalStorageCost.
+    virtual void
+    PreReduce();
+
     void
     Marshal();
 
