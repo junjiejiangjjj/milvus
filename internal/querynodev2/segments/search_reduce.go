@@ -52,7 +52,7 @@ func (scr *SearchCommonReduce) ReduceSearchResultData(ctx context.Context, searc
 			FieldsData: make([]*schemapb.FieldData, 0),
 			Scores:     make([]float32, 0),
 			Ids:        &schemapb.IDs{},
-			Topks:      make([]int64, 0),
+			Topks:      make([]int64, int(info.GetNq())),
 		}, nil
 	}
 	nq := info.GetNq()
