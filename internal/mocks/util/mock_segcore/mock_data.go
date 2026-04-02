@@ -358,6 +358,21 @@ func GenTestCollectionSchema(collectionName string, pkType schemapb.DataType, wi
 	return &schema
 }
 
+// GenTestCollectionSchemaWithNullableVec returns the standard test schema with
+// the float_vector field marked Nullable. Paired with GenInsertData's ValidData
+// population, this enables end-to-end tests against nullable vector fields
+// without per-test schema scaffolding.
+func GenTestCollectionSchemaWithNullableVec(collectionName string, pkType schemapb.DataType) *schemapb.CollectionSchema {
+	schema := GenTestCollectionSchema(collectionName, pkType, false)
+	for _, f := range schema.Fields {
+		if f.DataType == schemapb.DataType_FloatVector {
+			f.Nullable = true
+			break
+		}
+	}
+	return schema
+}
+
 func GenTestIndexInfoList(collectionID int64, schema *schemapb.CollectionSchema) []*indexpb.IndexInfo {
 	res := make([]*indexpb.IndexInfo, 0)
 	vectorFieldSchemas := typeutil.GetVectorFieldSchemas(schema)
@@ -460,14 +475,28 @@ func SaveBinLog(ctx context.Context,
 	schema *schemapb.CollectionSchema,
 	chunkManager storage.ChunkManager,
 ) ([]*datapb.FieldBinlog, []*datapb.FieldBinlog, error) {
-	log := log.Ctx(ctx)
-	binLogs, statsLogs, err := genStorageBlob(collectionID,
-		partitionID,
-		segmentID,
-		msgLength,
-		schema)
+	insertData, err := GenInsertData(msgLength, schema)
 	if err != nil {
-		log.Warn("getStorageBlob return error", zap.Error(err))
+		return nil, nil, err
+	}
+	return SaveBinLogWithData(ctx, collectionID, partitionID, segmentID, insertData, schema, chunkManager)
+}
+
+// SaveBinLogWithData is the same as SaveBinLog but accepts caller-built
+// InsertData. Tests that need to inspect or control the exact data written
+// (e.g. nullable vector tests that verify per-row payloads) use this.
+func SaveBinLogWithData(ctx context.Context,
+	collectionID int64,
+	partitionID int64,
+	segmentID int64,
+	insertData *storage.InsertData,
+	schema *schemapb.CollectionSchema,
+	chunkManager storage.ChunkManager,
+) ([]*datapb.FieldBinlog, []*datapb.FieldBinlog, error) {
+	log := log.Ctx(ctx)
+	binLogs, statsLogs, err := serializeInsertData(collectionID, partitionID, segmentID, insertData, schema)
+	if err != nil {
+		log.Warn("serializeInsertData return error", zap.Error(err))
 		return nil, nil, err
 	}
 
@@ -519,18 +548,14 @@ func SaveBinLog(ctx context.Context,
 	return fieldBinlog, statsBinlog, err
 }
 
-func genStorageBlob(collectionID int64,
+func serializeInsertData(collectionID int64,
 	partitionID int64,
 	segmentID int64,
-	msgLength int,
+	insertData *storage.InsertData,
 	schema *schemapb.CollectionSchema,
 ) ([]*storage.Blob, []*storage.Blob, error) {
 	collMeta := genCollectionMeta(collectionID, partitionID, schema)
 	inCodec := storage.NewInsertCodecWithSchema(collMeta)
-	insertData, err := genInsertData(msgLength, schema)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	binLogs, err := inCodec.Serialize(partitionID, segmentID, insertData)
 	if err != nil {
@@ -554,7 +579,51 @@ func genCollectionMeta(collectionID int64, partitionID int64, schema *schemapb.C
 	return colInfo
 }
 
-func genInsertData(msgLength int, schema *schemapb.CollectionSchema) (*storage.InsertData, error) {
+// NullablePatternValidData returns a deterministic valid_data bitmap for
+// nullable test fields: every 3rd row is null (rows 0, 3, 6, ...). Used by
+// both the insert generator and tests that want to know the pattern upfront.
+func NullablePatternValidData(msgLength int) []bool {
+	out := make([]bool, msgLength)
+	for i := range out {
+		out[i] = i%3 != 0
+	}
+	return out
+}
+
+func compactFloatVecData(src []float32, valid []bool, dim int) []float32 {
+	out := make([]float32, 0, len(src))
+	for i, v := range valid {
+		if v {
+			out = append(out, src[i*dim:(i+1)*dim]...)
+		}
+	}
+	return out
+}
+
+func compactByteVecData(src []byte, valid []bool, rowBytes int) []byte {
+	out := make([]byte, 0, len(src))
+	for i, v := range valid {
+		if v {
+			out = append(out, src[i*rowBytes:(i+1)*rowBytes]...)
+		}
+	}
+	return out
+}
+
+func compactInt8VecData(src []int8, valid []bool, dim int) []int8 {
+	out := make([]int8, 0, len(src))
+	for i, v := range valid {
+		if v {
+			out = append(out, src[i*dim:(i+1)*dim]...)
+		}
+	}
+	return out
+}
+
+// GenInsertData builds InsertData for testing. Nullable fields are stamped
+// with ValidData from NullablePatternValidData so that end-to-end tests can
+// predict which rows are null.
+func GenInsertData(msgLength int, schema *schemapb.CollectionSchema) (*storage.InsertData, error) {
 	insertData := &storage.InsertData{
 		Data: make(map[int64]storage.FieldData),
 	}
@@ -637,6 +706,51 @@ func genInsertData(msgLength int, schema *schemapb.CollectionSchema) (*storage.I
 		default:
 			err := errors.New("data type not supported")
 			return nil, err
+		}
+
+		// Populate ValidData for nullable fields using the shared pattern so
+		// binlog serialization preserves the null bits end-to-end. For vector
+		// fields the binlog serializer requires Data to be pre-compacted to
+		// valid_count * dim (null rows dropped), so we shrink Data here too.
+		if f.Nullable {
+			valid := NullablePatternValidData(msgLength)
+			switch fd := insertData.Data[f.FieldID].(type) {
+			case *storage.FloatVectorFieldData:
+				fd.Data = compactFloatVecData(fd.Data, valid, fd.Dim)
+				fd.ValidData = valid
+			case *storage.Float16VectorFieldData:
+				fd.Data = compactByteVecData(fd.Data, valid, fd.Dim*2)
+				fd.ValidData = valid
+			case *storage.BFloat16VectorFieldData:
+				fd.Data = compactByteVecData(fd.Data, valid, fd.Dim*2)
+				fd.ValidData = valid
+			case *storage.BinaryVectorFieldData:
+				fd.Data = compactByteVecData(fd.Data, valid, fd.Dim/8)
+				fd.ValidData = valid
+			case *storage.Int8VectorFieldData:
+				fd.Data = compactInt8VecData(fd.Data, valid, fd.Dim)
+				fd.ValidData = valid
+			case *storage.BoolFieldData:
+				fd.ValidData = valid
+			case *storage.Int8FieldData:
+				fd.ValidData = valid
+			case *storage.Int16FieldData:
+				fd.ValidData = valid
+			case *storage.Int32FieldData:
+				fd.ValidData = valid
+			case *storage.Int64FieldData:
+				fd.ValidData = valid
+			case *storage.FloatFieldData:
+				fd.ValidData = valid
+			case *storage.DoubleFieldData:
+				fd.ValidData = valid
+			case *storage.StringFieldData:
+				fd.ValidData = valid
+			case *storage.JSONFieldData:
+				fd.ValidData = valid
+			case *storage.ArrayFieldData:
+				fd.ValidData = valid
+			}
 		}
 	}
 	// set data for rowID field
@@ -1079,57 +1193,6 @@ func genHNSWDSL(schema *schemapb.CollectionSchema, ef int, topK int64, roundDeci
             >`, nil
 }
 
-func CheckSearchResult(ctx context.Context, nq int64, plan *segcore.SearchPlan, searchResult *segcore.SearchResult) error {
-	searchResults := make([]*segcore.SearchResult, 0)
-	searchResults = append(searchResults, searchResult)
-
-	topK := plan.GetTopK()
-	sliceNQs := []int64{nq / 5, nq / 5, nq / 5, nq / 5, nq / 5}
-	sliceTopKs := []int64{topK, topK / 2, topK, topK, topK / 2}
-	sInfo := segcore.ParseSliceInfo(sliceNQs, sliceTopKs, nq)
-
-	res, err := segcore.ReduceSearchResultsAndFillData(ctx, plan, searchResults, 1, sInfo.SliceNQs, sInfo.SliceTopKs)
-	if err != nil {
-		return err
-	}
-
-	for i := 0; i < len(sInfo.SliceNQs); i++ {
-		blob, _, err := segcore.GetSearchResultDataBlob(ctx, res, i)
-		if err != nil {
-			return err
-		}
-		if len(blob) == 0 {
-			return errors.New("wrong search result data blobs when checkSearchResult")
-		}
-
-		result := &schemapb.SearchResultData{}
-		err = proto.Unmarshal(blob, result)
-		if err != nil {
-			return err
-		}
-
-		if result.TopK != sliceTopKs[i] {
-			return errors.New("unexpected topK when checkSearchResult")
-		}
-		if result.NumQueries != sInfo.SliceNQs[i] {
-			return errors.New("unexpected nq when checkSearchResult")
-		}
-		// search empty segment, return empty result.IDs
-		if len(result.Ids.IdField.(*schemapb.IDs_IntId).IntId.Data) <= 0 {
-			return errors.New("unexpected Ids when checkSearchResult")
-		}
-		if len(result.Scores) <= 0 {
-			return errors.New("unexpected Scores when checkSearchResult")
-		}
-	}
-
-	for _, searchResult := range searchResults {
-		searchResult.Release()
-	}
-	segcore.DeleteSearchResultDataBlobs(res)
-	return nil
-}
-
 func GenSearchPlanAndRequests(collection *segcore.CCollection, segments []int64, indexType string, nq int64) (*segcore.SearchRequest, error) {
 	iReq, _ := genSearchRequest(nq, indexType, collection)
 	queryReq := &querypb.SearchRequest{
@@ -1139,6 +1202,162 @@ func GenSearchPlanAndRequests(collection *segcore.CCollection, segments []int64,
 		Scope:       querypb.DataScope_Historical,
 	}
 	return segcore.NewSearchRequest(collection, queryReq, queryReq.Req.GetPlaceholderGroup())
+}
+
+// GenSearchPlanAndRequestsWithTopK creates a search request with custom topK.
+func GenSearchPlanAndRequestsWithTopK(collection *segcore.CCollection, segments []int64, nq, topK int64) (*segcore.SearchRequest, error) {
+	return genSearchRequestWithOptions(collection, segments, nq, topK, nil)
+}
+
+// GenSearchPlanAndRequestsWithOutputFields creates a search request with custom topK and output fields.
+func GenSearchPlanAndRequestsWithOutputFields(collection *segcore.CCollection, segments []int64, nq, topK int64, outputFieldIDs []int64) (*segcore.SearchRequest, error) {
+	return genSearchRequestWithOptions(collection, segments, nq, topK, outputFieldIDs)
+}
+
+// GenSearchPlanAndRequestsWithGroupBy creates a search request with group-by enabled.
+// groupByFieldID is the scalar field to group by; groupSize is the per-group limit.
+func GenSearchPlanAndRequestsWithGroupBy(
+	collection *segcore.CCollection,
+	segments []int64,
+	nq, topK int64,
+	groupByFieldID int64,
+	groupSize int64,
+) (*segcore.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	var planNode planpb.PlanNode
+	if err := prototext.Unmarshal([]byte(planStr), &planNode); err != nil {
+		return nil, err
+	}
+	// genBruteForceDSL always emits a vector_anns plan, so VectorAnns/QueryInfo
+	// are non-nil here. If genBruteForceDSL ever changes to emit a different
+	// plan shape this will start panicking — keep them in sync.
+	planNode.GetVectorAnns().QueryInfo.GroupByFieldId = groupByFieldID
+	planNode.GetVectorAnns().QueryInfo.GroupSize = groupSize
+	return buildSearchRequestFromPlanNode(collection, segments, nq, &planNode)
+}
+
+func genSearchRequestWithOptions(collection *segcore.CCollection, segments []int64, nq, topK int64, outputFieldIDs []int64) (*segcore.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	var planNode planpb.PlanNode
+	if err := prototext.Unmarshal([]byte(planStr), &planNode); err != nil {
+		return nil, err
+	}
+	if len(outputFieldIDs) > 0 {
+		planNode.OutputFieldIds = outputFieldIDs
+	}
+	return buildSearchRequestFromPlanNode(collection, segments, nq, &planNode)
+}
+
+// buildSearchRequestFromPlanNode marshals the plan and wraps it in the
+// internalpb / querypb envelope shared by every test variant.
+func buildSearchRequestFromPlanNode(
+	collection *segcore.CCollection,
+	segments []int64,
+	nq int64,
+	planNode *planpb.PlanNode,
+) (*segcore.SearchRequest, error) {
+	placeHolder, err := genPlaceHolderGroup(nq)
+	if err != nil {
+		return nil, err
+	}
+	serializedPlan, err := proto.Marshal(planNode)
+	if err != nil {
+		return nil, err
+	}
+	iReq := &internalpb.SearchRequest{
+		Base:               genCommonMsgBase(commonpb.MsgType_Search, 0),
+		CollectionID:       collection.ID(),
+		PlaceholderGroup:   placeHolder,
+		SerializedExprPlan: serializedPlan,
+		DslType:            commonpb.DslType_BoolExprV1,
+		Nq:                 nq,
+		// Use MaxTimestamp so all inserted rows are visible to the search.
+		// Mock-inserted rows have timestamps starting from 1; the default 0
+		// would make every row invisible.
+		MvccTimestamp: typeutil.MaxTimestamp,
+	}
+	queryReq := &querypb.SearchRequest{
+		Req:         iReq,
+		DmlChannels: []string{fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collection.ID())},
+		SegmentIDs:  segments,
+		Scope:       querypb.DataScope_Historical,
+	}
+	return segcore.NewSearchRequest(collection, queryReq, queryReq.Req.GetPlaceholderGroup())
+}
+
+// GenSearchPlanAndRequestsFilterOnly creates a filter-only search request for
+// two-stage search testing. The request has FilterOnly=true so segcore only
+// returns valid_count per segment instead of actual search results.
+func GenSearchPlanAndRequestsFilterOnly(collection *segcore.CCollection, segments []int64, nq, topK int64) (*segcore.SearchRequest, error) {
+	_, searchReq, err := GenFilterOnlySearchRequests(collection, segments, nq, topK, collection.ID())
+	return searchReq, err
+}
+
+// buildQueryRequest assembles a querypb.SearchRequest from a brute-force DSL
+// plan. collectionID overrides the proto's CollectionID because
+// CCollection.ID() may be 0 when the collection is created through the
+// segment manager.
+func buildQueryRequest(collection *segcore.CCollection, segments []int64, nq, topK, collectionID int64, filterOnly bool) (*querypb.SearchRequest, error) {
+	planStr, err := genBruteForceDSL(collection.Schema(), topK, defaultRoundDecimal)
+	if err != nil {
+		return nil, err
+	}
+	var planNode planpb.PlanNode
+	if err := prototext.Unmarshal([]byte(planStr), &planNode); err != nil {
+		return nil, err
+	}
+	placeHolder, err := genPlaceHolderGroup(nq)
+	if err != nil {
+		return nil, err
+	}
+	serializedPlan, err := proto.Marshal(&planNode)
+	if err != nil {
+		return nil, err
+	}
+	return &querypb.SearchRequest{
+		Req: &internalpb.SearchRequest{
+			Base:               genCommonMsgBase(commonpb.MsgType_Search, 0),
+			CollectionID:       collectionID,
+			PlaceholderGroup:   placeHolder,
+			SerializedExprPlan: serializedPlan,
+			DslType:            commonpb.DslType_BoolExprV1,
+			Nq:                 nq,
+			Topk:               topK,
+			MvccTimestamp:      typeutil.MaxTimestamp,
+		},
+		DmlChannels: []string{fmt.Sprintf("by-dev-rootcoord-dml_0_%dv0", collectionID)},
+		SegmentIDs:  segments,
+		Scope:       querypb.DataScope_Historical,
+		FilterOnly:  filterOnly,
+	}, nil
+}
+
+// GenQueryRequest builds a querypb.SearchRequest for callers that construct
+// their own SearchTask and want Execute() to build the segcore.SearchRequest
+// itself.
+func GenQueryRequest(collection *segcore.CCollection, segments []int64, nq, topK, collectionID int64) (*querypb.SearchRequest, error) {
+	return buildQueryRequest(collection, segments, nq, topK, collectionID, false)
+}
+
+// GenFilterOnlySearchRequests creates both the querypb.SearchRequest and
+// segcore.SearchRequest with FilterOnly=true, for tests that need both
+// (e.g., a SearchTask driver test that also keeps a segcore reference).
+func GenFilterOnlySearchRequests(collection *segcore.CCollection, segments []int64, nq, topK, collectionID int64) (*querypb.SearchRequest, *segcore.SearchRequest, error) {
+	queryReq, err := buildQueryRequest(collection, segments, nq, topK, collectionID, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	searchReq, err := segcore.NewSearchRequest(collection, queryReq, queryReq.Req.GetPlaceholderGroup())
+	if err != nil {
+		return nil, nil, err
+	}
+	return queryReq, searchReq, nil
 }
 
 func GenInsertMsg(collection *segcore.CCollection, partitionID, segment int64, numRows int) (*msgstream.InsertMsg, error) {

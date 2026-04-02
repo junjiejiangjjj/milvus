@@ -1021,70 +1021,12 @@ class TestMilvusClientAddFieldFeatureInvalid(TestMilvusClientV2Base):
                                   nullable=True,
                                   check_task=CheckTasks.err_res, check_items=error)
 
-    @pytest.mark.tags(CaseLabel.L2)
-    def test_milvus_client_add_field_with_reranker_unsupported(self):
-        """
-        target: test that add_collection_field and decay ranker combination is not supported
-        method: create collection without reranker field, add nullable reranker field via add_collection_field,
-                then try to use it with decay ranker
-        expected: raise exception because decay ranker requires non-nullable fields but add_collection_field
-                 only supports nullable fields, creating a technical limitation
-        """
-        client = self._client()
-        collection_name = cf.gen_collection_name_by_testcase_name()
-        dim = 8
-
-        # 1. create collection WITHOUT reranker field initially
-        schema = self.create_schema(client, enable_dynamic_field=False)[0]
-        schema.add_field(default_primary_key_field_name, DataType.INT64, is_primary=True, auto_id=False)
-        schema.add_field(default_vector_field_name, DataType.FLOAT_VECTOR, dim=dim)
-        schema.add_field(default_string_field_name, DataType.VARCHAR, max_length=64, is_partition_key=True)
-        # Note: NO reranker field here - we'll try to add it later via add_collection_field
-
-        index_params = self.prepare_index_params(client)[0]
-        index_params.add_index(default_vector_field_name, metric_type="COSINE")
-        self.create_collection(client, collection_name, dimension=dim, schema=schema, index_params=index_params)
-
-        # 2. insert initial data WITHOUT reranker field
-        vectors = cf.gen_vectors(default_nb, dim, vector_data_type=DataType.FLOAT_VECTOR)
-        rows = [{default_primary_key_field_name: i, default_vector_field_name: vectors[i],
-                 default_string_field_name: str(i)} for i in range(default_nb)]
-        results = self.insert(client, collection_name, rows)[0]
-        assert results['insert_count'] == default_nb
-
-        # 3. Try to add nullable reranker field via add_collection_field (nullable must be True)
-        # This will succeed in adding the field, but then we'll test if it can work with decay reranker
-        # The conflict: add_collection_field only supports nullable fields, but decay reranker needs non-nullable fields
-        self.add_collection_field(client, collection_name, field_name=ct.default_reranker_field_name,
-                                  data_type=DataType.INT64, nullable=True, default_value=0)
-
-        # 4. Insert data with the newly added reranker field
-        # Generate new vectors for the second batch of data
-        vectors_batch2 = cf.gen_vectors(default_nb, dim, vector_data_type=DataType.FLOAT_VECTOR)
-        rows_with_reranker = [
-            {default_primary_key_field_name: i, default_vector_field_name: vectors_batch2[i - default_nb],
-             default_string_field_name: str(i), ct.default_reranker_field_name: i}
-            for i in range(default_nb, default_nb * 2)]
-        results = self.insert(client, collection_name, rows_with_reranker)[0]
-        assert results['insert_count'] == default_nb
-
-        # 5. Try to use the nullable reranker field with decay reranker
-        # This should fail because decay reranker requires non-nullable fields for proper functionality
-        from pymilvus import Function, FunctionType
-        my_rerank_fn = Function(
-            name="my_reranker",
-            input_field_names=[ct.default_reranker_field_name],
-            function_type=FunctionType.RERANK,
-            params={
-                "reranker": "decay",
-                "function": "gauss",
-                "origin": 0,
-                "offset": 0,
-                "decay": 0.5,
-                "scale": 100
-            }
-        )
-
-        error = {ct.err_code: 65535, ct.err_msg: "Function input field cannot be nullable: field reranker_field"}
-        self.search(client, collection_name, [vectors[0]], ranker=my_rerank_fn,
-                    check_task=CheckTasks.err_res, check_items=error)
+    # Skipped: the chain-based reranker pipeline (PR #47919) now supports
+    # nullable input fields — decay/score_combine/model rerankers handle nulls
+    # by producing null scores. This test's expectation (search should fail) is
+    # outdated. A replacement test verifying correct nullable reranker behavior
+    # should be added separately.
+    #
+    # @pytest.mark.tags(CaseLabel.L2)
+    # def test_milvus_client_add_field_with_reranker_unsupported(self):
+    #     ...
