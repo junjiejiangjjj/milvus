@@ -601,6 +601,11 @@ type ExportOptions struct {
 	// GroupByField specifies which column should be exported as GroupByFieldValue
 	// instead of being included in FieldsData. Empty means no group-by column.
 	GroupByField string
+	// SkipColumns lists column names to omit from FieldsData. Columns with
+	// segment-specific semantics (e.g., $element_indices) are exported by the
+	// caller after this generic conversion; listing them here prevents them
+	// from leaking into FieldsData as if they were schema fields.
+	SkipColumns []string
 }
 
 // ToSearchResultData exports the DataFrame to SearchResultData.
@@ -639,13 +644,23 @@ func ToSearchResultDataWithOptions(df *DataFrame, opts *ExportOptions) (*schemap
 
 	// Determine which columns to skip or export specially
 	groupByField := ""
+	var skipSet map[string]struct{}
 	if opts != nil {
 		groupByField = opts.GroupByField
+		if len(opts.SkipColumns) > 0 {
+			skipSet = make(map[string]struct{}, len(opts.SkipColumns))
+			for _, name := range opts.SkipColumns {
+				skipSet[name] = struct{}{}
+			}
+		}
 	}
 
 	// Export other fields
 	for _, name := range df.ColumnNames() {
 		if name == types.IDFieldName || name == types.ScoreFieldName || name == GroupScoreFieldName {
+			continue
+		}
+		if _, ok := skipSet[name]; ok {
 			continue
 		}
 
@@ -804,6 +819,17 @@ func exportFieldData(df *DataFrame, name string) (*schemapb.FieldData, error) {
 			}
 		}
 
+	case schemapb.DataType_Geometry:
+		var data [][]byte
+		data, err = exportGeometryFieldData(col, name)
+		if err == nil {
+			fieldData.Field = &schemapb.FieldData_Scalars{
+				Scalars: &schemapb.ScalarField{
+					Data: &schemapb.ScalarField_GeometryData{GeometryData: &schemapb.GeometryArray{Data: data}},
+				},
+			}
+		}
+
 	default:
 		return nil, merr.WrapErrServiceInternal(fmt.Sprintf("exportFieldData: unsupported type %s for column %s", dataType.String(), name))
 	}
@@ -820,6 +846,25 @@ func exportFieldData(df *DataFrame, name string) (*schemapb.FieldData, error) {
 	}
 
 	return fieldData, nil
+}
+
+func exportGeometryFieldData(col *arrow.Chunked, name string) ([][]byte, error) {
+	data := make([][]byte, 0, col.Len())
+	for i := 0; i < len(col.Chunks()); i++ {
+		switch chunk := col.Chunk(i).(type) {
+		case *array.String:
+			for j := 0; j < chunk.Len(); j++ {
+				data = append(data, []byte(chunk.Value(j)))
+			}
+		case *array.Binary:
+			for j := 0; j < chunk.Len(); j++ {
+				data = append(data, append([]byte(nil), chunk.Value(j)...))
+			}
+		default:
+			return nil, merr.WrapErrServiceInternal(fmt.Sprintf("column %s chunk %d type mismatch", name, i))
+		}
+	}
+	return data, nil
 }
 
 // maxChunkSize returns the maximum chunk size in the DataFrame.

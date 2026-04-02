@@ -84,6 +84,16 @@ ReduceHelper::Initialize() {
 
 void
 ReduceHelper::Reduce() {
+    PreReduce();
+    SortEqualScoresByPks();
+    ReduceResultData();
+    RefreshSearchResults();
+    FillEntryData();
+    GetTotalStorageCost();
+}
+
+void
+ReduceHelper::PreReduce() {
     auto global_refine_enable =
         plan_->plan_node_->search_info_.global_refine_enable_;
     AssertInfo(!(global_refine_enable &&
@@ -100,11 +110,6 @@ ReduceHelper::Reduce() {
         FilterInvalidSearchResults();
         FillPrimaryKey();
     }
-    SortEqualScoresByPks();
-    ReduceResultData();
-    RefreshSearchResults();
-    FillEntryData();
-    GetTotalStorageCost();
 }
 
 bool
@@ -211,7 +216,13 @@ ReduceHelper::FilterInvalidSearchResults() {
         if (search_result->unity_topK_ == 0) {
             continue;
         }
-        FilterInvalidSearchResult(search_result);
+        // Group-by results are already compact: SearchGroupByOperator does
+        // not pad with INVALID_SEG_OFFSET and topk_per_nq_prefix_sum_ is
+        // populated by the operator. Skip FilterInvalidSearchResult, whose
+        // assertion (size == nq * topK) does not hold for group-by layouts.
+        if (!search_result->composite_group_by_values_.has_value()) {
+            FilterInvalidSearchResult(search_result);
+        }
         LOG_DEBUG("the size of search result: {}",
                   search_result->seg_offsets_.size());
         if (search_result->get_total_result_count() > 0) {
