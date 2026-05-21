@@ -17,6 +17,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -129,6 +130,66 @@ INSTANTIATE_TEST_SUITE_P(TaskTestSuite,
                          TaskTest,
                          ::testing::Values(DataType::VECTOR_FLOAT,
                                            DataType::VECTOR_SPARSE_U32_F32));
+
+namespace {
+
+bool
+PlanTreeContainsRescoresNode(const std::shared_ptr<milvus::plan::PlanNode>& root) {
+    std::queue<std::shared_ptr<milvus::plan::PlanNode>> queue;
+    if (root != nullptr) {
+        queue.push(root);
+    }
+
+    while (!queue.empty()) {
+        auto node = queue.front();
+        queue.pop();
+        if (std::dynamic_pointer_cast<milvus::plan::RescoresNode>(node) !=
+            nullptr) {
+            return true;
+        }
+        for (const auto& source : node->sources()) {
+            queue.push(source);
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST(PlanProtoTest, ScorersDoNotInsertRescoresNode) {
+    using namespace milvus;
+    using namespace milvus::query;
+
+    auto schema = std::make_shared<Schema>();
+    auto vec_fid = schema->AddDebugField(
+        "fakevec", DataType::VECTOR_FLOAT, 16, knowhere::metric::L2);
+    auto pk_fid = schema->AddDebugField("pk", DataType::INT64);
+    schema->set_primary_field_id(pk_fid);
+
+    proto::plan::PlanNode plan_node;
+    auto anns = plan_node.mutable_vector_anns();
+    anns->set_vector_type(proto::plan::VectorType::FloatVector);
+    anns->set_field_id(vec_fid.get());
+    anns->set_placeholder_tag("$0");
+    auto query_info = anns->mutable_query_info();
+    query_info->set_topk(10);
+    query_info->set_metric_type(knowhere::metric::L2);
+    query_info->set_search_params(R"({"nprobe": 10})");
+
+    auto scorer = plan_node.add_scorers();
+    scorer->set_weight(2.0F);
+    scorer->set_type(proto::plan::FunctionType::FunctionTypeWeight);
+    plan_node.mutable_score_option()->set_boost_mode(
+        proto::plan::BoostMode::BoostModeMultiply);
+    plan_node.mutable_score_option()->set_function_mode(
+        proto::plan::FunctionMode::FunctionModeSum);
+
+    auto plan = CreateSearchPlanFromPlanNode(schema, plan_node);
+    ASSERT_NE(plan, nullptr);
+    ASSERT_NE(plan->plan_node_, nullptr);
+    ASSERT_NE(plan->plan_node_->plannodes_, nullptr);
+    EXPECT_FALSE(PlanTreeContainsRescoresNode(plan->plan_node_->plannodes_));
+}
 
 TEST_P(TaskTest, RegisterFunction) {
     milvus::exec::expression::FunctionFactory& factory =

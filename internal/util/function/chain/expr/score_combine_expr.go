@@ -193,32 +193,29 @@ func (s *ScoreCombineExpr) processChunk(ctx *types.FuncContext, inputs []*arrow.
 	chunkLen := inputs[0].Chunk(chunkIdx).Len()
 
 	for rowIdx := 0; rowIdx < chunkLen; rowIdx++ {
-		// Check if any input is null
-		hasNull := false
-		for _, input := range inputs {
-			if input.Chunk(chunkIdx).IsNull(rowIdx) {
-				hasNull = true
-				break
-			}
-		}
-
-		if hasNull {
-			builder.AppendNull()
-			continue
-		}
-
-		// Collect values from all input columns using base_expr utility
-		values := make([]float64, len(inputs))
+		values := make([]float64, 0, len(inputs))
+		weights := make([]float64, 0, len(inputs))
 		for colIdx, input := range inputs {
+			if input.Chunk(chunkIdx).IsNull(rowIdx) {
+				continue
+			}
+
 			val, err := GetNumericValue(input.Chunk(chunkIdx), rowIdx)
 			if err != nil {
 				return nil, merr.WrapErrServiceInternal(fmt.Sprintf("score_combine: column %d: %v", colIdx, err))
 			}
-			values[colIdx] = val
+			values = append(values, val)
+			if s.mode == ModeWeighted {
+				weights = append(weights, s.weights[colIdx])
+			}
 		}
 
-		// Combine values based on mode
-		result := s.combine(values)
+		if len(values) == 0 {
+			builder.AppendNull()
+			continue
+		}
+
+		result := s.combine(values, weights)
 		builder.Append(float32(result))
 	}
 
@@ -226,7 +223,7 @@ func (s *ScoreCombineExpr) processChunk(ctx *types.FuncContext, inputs []*arrow.
 }
 
 // combine combines multiple values based on the mode.
-func (s *ScoreCombineExpr) combine(values []float64) float64 {
+func (s *ScoreCombineExpr) combine(values []float64, weights []float64) float64 {
 	switch s.mode {
 	case ModeMultiply:
 		result := 1.0
@@ -266,7 +263,7 @@ func (s *ScoreCombineExpr) combine(values []float64) float64 {
 	case ModeWeighted:
 		sum := 0.0
 		for i, v := range values {
-			sum += v * s.weights[i]
+			sum += v * weights[i]
 		}
 		return sum
 
