@@ -57,6 +57,19 @@ func TestNewConfig(t *testing.T) {
 	}, config)
 }
 
+func TestNewConfigInvalidLoadTimeoutUsesDefault(t *testing.T) {
+	for _, value := range []string{"timeout", "0s", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			params := newPyUDFComponentParam()
+			params.FunctionCfg.PyUDFLoadTimeout.SwapTempValue(value)
+
+			config, err := NewConfig(params)
+			require.NoError(t, err)
+			assert.Equal(t, 30*time.Second, config.LoadTimeout)
+		})
+	}
+}
+
 func TestNewConfigInvalid(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -74,27 +87,6 @@ func TestNewConfigInvalid(t *testing.T) {
 				params.FunctionCfg.PyUDFEnabled.SwapTempValue("enabled")
 			},
 			match: "function.pyUDF.enabled",
-		},
-		{
-			name: "malformed load timeout",
-			set: func(params *paramtable.ComponentParam) {
-				params.FunctionCfg.PyUDFLoadTimeout.SwapTempValue("timeout")
-			},
-			match: "function.pyUDF.loadTimeout",
-		},
-		{
-			name: "zero load timeout",
-			set: func(params *paramtable.ComponentParam) {
-				params.FunctionCfg.PyUDFLoadTimeout.SwapTempValue("0s")
-			},
-			match: "function.pyUDF.loadTimeout",
-		},
-		{
-			name: "negative load timeout",
-			set: func(params *paramtable.ComponentParam) {
-				params.FunctionCfg.PyUDFLoadTimeout.SwapTempValue("-1s")
-			},
-			match: "function.pyUDF.loadTimeout",
 		},
 		{
 			name: "malformed executor threads",

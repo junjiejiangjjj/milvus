@@ -17,9 +17,11 @@
 package pyudf
 
 import (
+	"context"
 	"strconv"
 	"time"
 
+	"github.com/milvus-io/milvus/pkg/v3/mlog"
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 	"github.com/milvus-io/milvus/pkg/v3/util/paramtable"
 )
@@ -47,7 +49,14 @@ func NewConfig(params *paramtable.ComponentParam) (Config, error) {
 	loadTimeoutValue := params.FunctionCfg.PyUDFLoadTimeout.GetValue()
 	loadTimeout, err := time.ParseDuration(loadTimeoutValue)
 	if err != nil || loadTimeout <= 0 {
-		return Config{}, invalidConfig("loadTimeout", loadTimeoutValue)
+		defaultValue := params.FunctionCfg.PyUDFLoadTimeout.DefaultValue
+		loadTimeout, err = time.ParseDuration(defaultValue)
+		if err != nil || loadTimeout <= 0 {
+			return Config{}, invalidConfig("loadTimeout default", defaultValue)
+		}
+		mlog.Warn(context.TODO(), "invalid PyUDF load timeout, using default value",
+			mlog.String("value", loadTimeoutValue),
+			mlog.String("defaultValue", defaultValue))
 	}
 	executorThreadsValue := params.FunctionCfg.PyUDFExecutorThreads.GetValue()
 	executorThreads, err := strconv.Atoi(executorThreadsValue)
