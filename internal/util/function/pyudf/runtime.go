@@ -18,10 +18,12 @@ package pyudf
 
 import (
 	"context"
+	"strings"
 
 	"github.com/apache/arrow/go/v17/arrow"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // Runtime acquires a loaded PyUDF resource for one expression execution.
@@ -33,4 +35,21 @@ type Runtime interface {
 type Lease interface {
 	Run(ctx context.Context, params *schemapb.FunctionParamObject, inputs []*arrow.Chunked) ([]*arrow.Chunked, error)
 	Release()
+}
+
+type unavailableRuntime struct {
+	reason string
+}
+
+// NewUnavailableRuntime creates a runtime that returns a clear unavailable error on acquisition.
+func NewUnavailableRuntime(reason string) Runtime {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "embedded PyUDF runtime is unavailable"
+	}
+	return &unavailableRuntime{reason: reason}
+}
+
+func (r *unavailableRuntime) Acquire(context.Context, string, string) (Lease, error) {
+	return nil, merr.WrapErrServiceInternalMsg("py_udf: runtime is unavailable: %s", r.reason)
 }
