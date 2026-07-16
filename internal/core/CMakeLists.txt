@@ -452,6 +452,12 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/rescores/
         FILES_MATCHING PATTERN "*_c.h"
 )
 
+# Install pyudf
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/pyudf/
+        DESTINATION include/pyudf
+        FILES_MATCHING PATTERN "*_c.h"
+)
+
 # cgo consumers need milvus-common headers in the core output include path.
 foreach(MILVUS_COMMON_INCLUDE_DIR IN LISTS milvus-common_INCLUDE_DIRS)
     install(DIRECTORY ${MILVUS_COMMON_INCLUDE_DIR}/
