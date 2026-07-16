@@ -18,7 +18,6 @@ package pyudf
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -26,6 +25,7 @@ import (
 	"time"
 
 	"github.com/apache/arrow/go/v17/arrow"
+	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -433,7 +433,7 @@ func TestCacheClose(t *testing.T) {
 func TestNewCacheValidation(t *testing.T) {
 	_, err := NewCache(context.Background(), nil, 0)
 	assert.ErrorIs(t, err, merr.ErrServiceInternal)
-	cache, err := NewCache(nil, nil, time.Second)
+	cache, err := NewCache(context.TODO(), nil, time.Second)
 	require.NoError(t, err)
 	cache.Close()
 }

@@ -103,7 +103,6 @@ func TestFunctionConfig(t *testing.T) {
 	assert.Equal(t, 1, cfg.GetAnalyzerRunnerConcurrency())
 
 	assert.Equal(t, 30*time.Second, cfg.ModelRequestTimeout.GetAsDurationByParse())
-
 }
 
 func TestFunctionConfigPyUDF(t *testing.T) {
