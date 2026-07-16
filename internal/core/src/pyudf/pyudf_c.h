@@ -58,6 +58,9 @@ PyUDFInvocationInputSchema(CPyUDFInvocation invocation,
 void
 DeletePyUDFInvocation(CPyUDFInvocation invocation);
 
+CStatus
+RunPyUDFIdentity(CPyUDFInvocation invocation, CPyUDFResult* result);
+
 int32_t
 PyUDFResultNumOutputs(CPyUDFResult result);
 

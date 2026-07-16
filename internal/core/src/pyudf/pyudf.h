@@ -18,11 +18,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "common/arrow_c_data_c.h"
 
 namespace milvus::pyudf {
+
+class PyUDFResult;
 
 class PyUDFInvocation {
  public:
@@ -52,6 +55,9 @@ class PyUDFInvocation {
 
     ArrowSchema*
     input_schema(int32_t input_index, int32_t chunk_index);
+
+    std::unique_ptr<PyUDFResult>
+    RunIdentity();
 
  private:
     size_t

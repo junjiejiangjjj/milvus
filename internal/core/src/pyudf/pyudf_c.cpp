@@ -83,6 +83,32 @@ DeletePyUDFInvocation(CPyUDFInvocation invocation) {
     delete static_cast<milvus::pyudf::PyUDFInvocation*>(invocation);
 }
 
+CStatus
+RunPyUDFIdentity(CPyUDFInvocation invocation, CPyUDFResult* result) {
+    if (result == nullptr) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: result output pointer is nil");
+    }
+    *result = nullptr;
+
+    auto value = static_cast<milvus::pyudf::PyUDFInvocation*>(invocation);
+    if (value == nullptr) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: invocation is nil");
+    }
+
+    try {
+        auto identity_result = value->RunIdentity();
+        *result = static_cast<CPyUDFResult>(identity_result.release());
+        return milvus::SuccessCStatus();
+    } catch (const std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    } catch (...) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: unknown native exception");
+    }
+}
+
 int32_t
 PyUDFResultNumOutputs(CPyUDFResult result) {
     auto value = static_cast<milvus::pyudf::PyUDFResult*>(result);

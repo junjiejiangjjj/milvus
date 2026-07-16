@@ -46,6 +46,33 @@ ReleaseSlots(std::vector<ArrowArray>& arrays,
     }
 }
 
+bool
+IsPopulated(const ArrowArray& array, const ArrowSchema& schema) {
+    return array.release != nullptr && schema.release != nullptr;
+}
+
+void
+MoveDescriptor(ArrowArray* destination, ArrowArray* source) {
+    if (destination == nullptr || source == nullptr ||
+        destination->release != nullptr) {
+        throw std::invalid_argument(
+            "py_udf: ArrowArray move requires an empty destination");
+    }
+    *destination = *source;
+    *source = {};
+}
+
+void
+MoveDescriptor(ArrowSchema* destination, ArrowSchema* source) {
+    if (destination == nullptr || source == nullptr ||
+        destination->release != nullptr) {
+        throw std::invalid_argument(
+            "py_udf: ArrowSchema move requires an empty destination");
+    }
+    *destination = *source;
+    *source = {};
+}
+
 }  // namespace
 
 PyUDFInvocation::PyUDFInvocation(int32_t num_inputs,
@@ -107,6 +134,30 @@ PyUDFInvocation::input_schema(int32_t input_index, int32_t chunk_index) {
         return nullptr;
     }
     return &input_schemas_[slot_index(input_index, chunk_index)];
+}
+
+std::unique_ptr<PyUDFResult>
+PyUDFInvocation::RunIdentity() {
+    for (size_t slot = 0; slot < input_arrays_.size(); ++slot) {
+        if (!IsPopulated(input_arrays_[slot], input_schemas_[slot])) {
+            throw std::invalid_argument(
+                "py_udf: all invocation input slots must be populated");
+        }
+    }
+
+    std::vector<int32_t> output_chunks(static_cast<size_t>(num_inputs_),
+                                       num_chunks_);
+    auto result =
+        std::make_unique<PyUDFResult>(num_inputs_, output_chunks.data());
+    for (int32_t input = 0; input < num_inputs_; ++input) {
+        for (int32_t chunk = 0; chunk < num_chunks_; ++chunk) {
+            MoveDescriptor(result->output_array(input, chunk),
+                           input_array(input, chunk));
+            MoveDescriptor(result->output_schema(input, chunk),
+                           input_schema(input, chunk));
+        }
+    }
+    return result;
 }
 
 size_t

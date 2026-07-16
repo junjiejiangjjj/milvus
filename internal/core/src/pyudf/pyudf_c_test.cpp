@@ -54,6 +54,19 @@ Populate(ArrowArray* array, ArrowSchema* schema, ReleaseCounter* counter) {
 }
 
 void
+PopulateDescriptor(ArrowArray* array,
+                   ArrowSchema* schema,
+                   ReleaseCounter* counter,
+                   int64_t array_length,
+                   int64_t array_offset,
+                   const char* schema_format) {
+    Populate(array, schema, counter);
+    array->length = array_length;
+    array->offset = array_offset;
+    schema->format = schema_format;
+}
+
+void
 FreeStatus(CStatus* status) {
     if (status->error_code != 0 && status->error_msg != nullptr) {
         free(const_cast<char*>(status->error_msg));
@@ -147,6 +160,102 @@ TEST(PyUDFHandlesCTest, InvocationDeletesPopulatedSlotsExactlyOnce) {
     DeletePyUDFInvocation(invocation);
     EXPECT_EQ(counter.arrays, 2);
     EXPECT_EQ(counter.schemas, 2);
+}
+
+TEST(PyUDFHandlesCTest, IdentityMovesDescriptorsAndReleasesOnce) {
+    int64_t chunk_sizes[] = {2, 0};
+    auto invocation = NewInvocation(2, 2, chunk_sizes);
+    ReleaseCounter counter;
+
+    for (int32_t input = 0; input < 2; ++input) {
+        for (int32_t chunk = 0; chunk < 2; ++chunk) {
+            auto array = PyUDFInvocationInputArray(invocation, input, chunk);
+            auto schema = PyUDFInvocationInputSchema(invocation, input, chunk);
+            PopulateDescriptor(array,
+                               schema,
+                               &counter,
+                               10 * input + chunk,
+                               input + chunk,
+                               input == 0 ? "l" : "u");
+        }
+    }
+
+    CPyUDFResult result = nullptr;
+    auto status = RunPyUDFIdentity(invocation, &result);
+    ASSERT_EQ(status.error_code, 0) << status.error_msg;
+    ASSERT_NE(result, nullptr);
+    FreeStatus(&status);
+
+    EXPECT_EQ(PyUDFResultNumOutputs(result), 2);
+    for (int32_t output = 0; output < 2; ++output) {
+        EXPECT_EQ(PyUDFResultNumChunks(result, output), 2);
+        for (int32_t chunk = 0; chunk < 2; ++chunk) {
+            auto input_array =
+                PyUDFInvocationInputArray(invocation, output, chunk);
+            auto input_schema =
+                PyUDFInvocationInputSchema(invocation, output, chunk);
+            EXPECT_EQ(input_array->release, nullptr);
+            EXPECT_EQ(input_schema->release, nullptr);
+
+            auto output_array = PyUDFResultArray(result, output, chunk);
+            auto output_schema = PyUDFResultSchema(result, output, chunk);
+            ASSERT_NE(output_array, nullptr);
+            ASSERT_NE(output_schema, nullptr);
+            EXPECT_EQ(output_array->length, 10 * output + chunk);
+            EXPECT_EQ(output_array->offset, output + chunk);
+            EXPECT_STREQ(output_schema->format, output == 0 ? "l" : "u");
+            EXPECT_NE(output_array->release, nullptr);
+            EXPECT_NE(output_schema->release, nullptr);
+        }
+    }
+
+    DeletePyUDFInvocation(invocation);
+    EXPECT_EQ(counter.arrays, 0);
+    EXPECT_EQ(counter.schemas, 0);
+    DeletePyUDFResult(result);
+    EXPECT_EQ(counter.arrays, 4);
+    EXPECT_EQ(counter.schemas, 4);
+}
+
+TEST(PyUDFHandlesCTest, IdentityRejectsUnpopulatedSlotsAtomically) {
+    int64_t chunk_sizes[] = {1, 1};
+    auto invocation = NewInvocation(1, 2, chunk_sizes);
+    ReleaseCounter counter;
+    Populate(PyUDFInvocationInputArray(invocation, 0, 0),
+             PyUDFInvocationInputSchema(invocation, 0, 0),
+             &counter);
+
+    CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
+    auto status = RunPyUDFIdentity(invocation, &result);
+    EXPECT_NE(status.error_code, 0);
+    EXPECT_EQ(result, nullptr);
+    FreeStatus(&status);
+
+    auto populated_array = PyUDFInvocationInputArray(invocation, 0, 0);
+    auto populated_schema = PyUDFInvocationInputSchema(invocation, 0, 0);
+    EXPECT_NE(populated_array->release, nullptr);
+    EXPECT_NE(populated_schema->release, nullptr);
+    EXPECT_EQ(PyUDFInvocationInputArray(invocation, 0, 1)->release, nullptr);
+    EXPECT_EQ(PyUDFInvocationInputSchema(invocation, 0, 1)->release, nullptr);
+
+    DeletePyUDFInvocation(invocation);
+    EXPECT_EQ(counter.arrays, 1);
+    EXPECT_EQ(counter.schemas, 1);
+}
+
+TEST(PyUDFHandlesCTest, IdentityRejectsNullArguments) {
+    CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
+    auto status = RunPyUDFIdentity(nullptr, &result);
+    EXPECT_NE(status.error_code, 0);
+    EXPECT_EQ(result, nullptr);
+    FreeStatus(&status);
+
+    int64_t chunk_sizes[] = {1};
+    auto invocation = NewInvocation(1, 1, chunk_sizes);
+    status = RunPyUDFIdentity(invocation, nullptr);
+    EXPECT_NE(status.error_code, 0);
+    FreeStatus(&status);
+    DeletePyUDFInvocation(invocation);
 }
 
 TEST(PyUDFHandlesCTest, ResultExposesMetadataAndBounds) {
