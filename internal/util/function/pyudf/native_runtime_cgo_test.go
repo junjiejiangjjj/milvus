@@ -78,7 +78,6 @@ func TestNativeLoadRequestWireValidation(t *testing.T) {
 		request *cgopb.PyUDFLoadRequest
 		match   string
 	}{
-		{name: "no protocol fields", request: &cgopb.PyUDFLoadRequest{}, match: "no protocol fields"},
 		{name: "blank resource name", request: cloneLoadRequest(valid, func(request *cgopb.PyUDFLoadRequest) { request.ResourceName = "  " }), match: "blank or invalid UTF-8"},
 		{name: "blank resource path", request: cloneLoadRequest(valid, func(request *cgopb.PyUDFLoadRequest) { request.ResourcePath = "" }), match: "blank or invalid UTF-8"},
 		{name: "blank local path", request: cloneLoadRequest(valid, func(request *cgopb.PyUDFLoadRequest) { request.LocalPath = "\t" }), match: "blank or invalid UTF-8"},
@@ -101,6 +100,15 @@ func TestNativeLoadRequestWireValidation(t *testing.T) {
 			assert.ErrorContains(t, err, test.match)
 		})
 	}
+
+	t.Run("no protocol fields", func(t *testing.T) {
+		// Encode resource_id=0 explicitly. Protobuf parses this successfully but
+		// normalizes it to the default value, leaving no protocol fields.
+		resource, err := loadNativeResource([]byte{0x10, 0x00})
+		require.Error(t, err)
+		assert.Nil(t, resource)
+		assert.ErrorContains(t, err, "no protocol fields")
+	})
 
 	t.Run("empty request", func(t *testing.T) {
 		resource, err := loadNativeResource(nil)
