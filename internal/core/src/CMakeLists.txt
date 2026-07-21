@@ -179,6 +179,10 @@ if (ENABLE_GCP_NATIVE)
     set(LINK_TARGETS ${LINK_TARGETS} gcp-native-storage)
 endif()
 
+if (MILVUS_ENABLE_PY_UDF)
+    list(APPEND LINK_TARGETS Python3::Python)
+endif()
+
 target_link_libraries(milvus_core ${LINK_TARGETS})
 
 install(TARGETS milvus_core DESTINATION "${CMAKE_INSTALL_LIBDIR}")

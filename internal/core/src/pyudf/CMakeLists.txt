@@ -15,5 +15,23 @@
 # limitations under the License.
 
 add_source_at_current_directory_recursively()
+
+# Keep Arrow C Data handles available in every build, but compile exactly one
+# load-runtime backend.  The backend source files are intentionally separate so
+# OFF builds never parse Python.h or inherit a libpython dependency.
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*pyudf_runtime_cpython\\.cpp$")
+list(FILTER SOURCE_FILES EXCLUDE REGEX ".*pyudf_runtime_stub\\.cpp$")
+if (MILVUS_ENABLE_PY_UDF)
+    list(APPEND SOURCE_FILES pyudf_runtime_cpython.cpp)
+else()
+    list(APPEND SOURCE_FILES pyudf_runtime_stub.cpp)
+endif()
+
 add_library(milvus_pyudf OBJECT ${SOURCE_FILES})
 target_link_libraries(milvus_pyudf PUBLIC milvus_conan_deps)
+if (MILVUS_ENABLE_PY_UDF)
+    target_compile_definitions(
+        milvus_pyudf
+        PRIVATE MILVUS_ENABLE_PY_UDF=1)
+    target_link_libraries(milvus_pyudf PUBLIC Python3::Python)
+endif()

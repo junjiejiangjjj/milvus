@@ -315,4 +315,27 @@ TEST(PyUDFHandlesCTest, NullHandlesAreSafe) {
     DeletePyUDFResult(nullptr);
 }
 
+TEST(PyUDFRuntimeCTest, BuildCapabilityAndBoundaryBehavior) {
+    CPyUDFResource resource = reinterpret_cast<CPyUDFResource>(0x1);
+    if (PyUDFRuntimeBuildEnabled()) {
+        auto status = LoadPyUDFResource(nullptr, 0, &resource);
+        EXPECT_NE(status.error_code, 0);
+        EXPECT_EQ(resource, nullptr);
+        FreeStatus(&status);
+    } else {
+        auto status = InitializePyUDFRuntime();
+        EXPECT_EQ(status.error_code, 2003);
+        FreeStatus(&status);
+
+        status = LoadPyUDFResource(nullptr, 0, &resource);
+        EXPECT_EQ(status.error_code, 2003);
+        EXPECT_EQ(resource, nullptr);
+        FreeStatus(&status);
+    }
+
+    auto status = DeletePyUDFResource(nullptr);
+    EXPECT_EQ(status.error_code, 0);
+    FreeStatus(&status);
+}
+
 }  // namespace

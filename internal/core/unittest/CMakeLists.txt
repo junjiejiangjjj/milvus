@@ -158,6 +158,40 @@ set_target_properties(all_tests PROPERTIES
 
 install(TARGETS all_tests DESTINATION unittest)
 
+if (BUILD_UNIT_TEST STREQUAL "ON" AND MILVUS_ENABLE_PY_UDF)
+    add_executable(pyudf_runtime_cpython_test pyudf_runtime_cpython_test.cpp)
+    target_link_libraries(pyudf_runtime_cpython_test
+        PRIVATE
+        milvus_core
+        milvus_conan_deps
+        Python3::Python
+    )
+    install(TARGETS pyudf_runtime_cpython_test DESTINATION unittest)
+
+    set(PYUDF_RUNTIME_CPYTHON_TEST_CASES
+        load-before-initialization
+        preinitialized-cpython-rejected
+        concurrent-idempotent-initialize
+        trusted-wrapper-import-failure
+        trusted-wrapper-missing-api-version
+        trusted-wrapper-incompatible-api-version
+        trusted-wrapper-non-callable-loader
+        trusted-wrapper-non-callable-closer
+        request-validation
+        python-load-exception
+        invalid-python-load-result
+        valid-load-and-close
+        close-exception
+        concurrent-idempotent-close
+    )
+    foreach(PYUDF_RUNTIME_CPYTHON_TEST_CASE IN LISTS PYUDF_RUNTIME_CPYTHON_TEST_CASES)
+        add_test(
+            NAME pyudf_runtime_cpython_${PYUDF_RUNTIME_CPYTHON_TEST_CASE}
+            COMMAND pyudf_runtime_cpython_test --case ${PYUDF_RUNTIME_CPYTHON_TEST_CASE}
+        )
+    endforeach()
+endif()
+
 add_subdirectory(test_json_stats)
 
 # bitset unit test

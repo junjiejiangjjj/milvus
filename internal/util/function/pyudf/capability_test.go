@@ -17,7 +17,6 @@
 package pyudf
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,12 +24,6 @@ import (
 
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
-
-func TestEmbeddedBuildCapability(t *testing.T) {
-	capability := EmbeddedBuildCapability()
-	assert.False(t, capability.Available)
-	assert.NotEmpty(t, capability.Reason)
-}
 
 func TestValidateConfigCapability(t *testing.T) {
 	unavailable := BuildCapability{Reason: "runtime was not compiled"}
@@ -46,20 +39,6 @@ func TestValidateConfigCapability(t *testing.T) {
 	assert.ErrorContains(t, err, "runtime was not compiled")
 
 	err = ValidateConfigCapability(Config{Enabled: true}, BuildCapability{})
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "embedded PyUDF runtime is unavailable")
-}
-
-func TestUnavailableRuntime(t *testing.T) {
-	runtime := NewUnavailableRuntime("function.pyUDF.enabled is false")
-	lease, err := runtime.Acquire(context.Background(), "rank_udf", "L2_rerank")
-	require.Error(t, err)
-	assert.Nil(t, lease)
-	assert.ErrorIs(t, err, merr.ErrServiceInternal)
-	assert.ErrorContains(t, err, "function.pyUDF.enabled is false")
-
-	runtime = NewUnavailableRuntime(" ")
-	_, err = runtime.Acquire(context.Background(), "rank_udf", "L2_rerank")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "embedded PyUDF runtime is unavailable")
 }

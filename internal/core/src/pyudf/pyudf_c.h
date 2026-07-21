@@ -26,6 +26,27 @@ extern "C" {
 
 typedef void* CPyUDFInvocation;
 typedef void* CPyUDFResult;
+typedef void* CPyUDFResource;
+
+// Returns whether this core library was built with the embedded CPython runtime.
+bool
+PyUDFRuntimeBuildEnabled(void);
+
+// Initializes the process-lifetime, isolated PyUDF interpreter and imports the
+// trusted runtime package installed with Milvus. Repeated calls are idempotent.
+CStatus
+InitializePyUDFRuntime(void);
+
+// Loads the serialized milvus.proto.cgo.PyUDFLoadRequest into an owned native
+// resource. On failure, *resource is always set to nullptr.
+CStatus
+LoadPyUDFResource(const uint8_t* serialized_request,
+                  uint64_t serialized_request_len,
+                  CPyUDFResource* resource);
+
+// Releases a resource. A null resource is a successful no-op.
+CStatus
+DeletePyUDFResource(CPyUDFResource resource);
 
 struct ArrowArray;
 struct ArrowSchema;

@@ -16,9 +16,26 @@
 
 package pyudf
 
-func embeddedBuildCapability() BuildCapability {
-	return BuildCapability{
-		Available: false,
-		Reason:    "embedded PyUDF runtime is not compiled into this binary",
-	}
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
+)
+
+func TestUnavailableRuntime(t *testing.T) {
+	runtime := NewUnavailableRuntime("function.pyUDF.enabled is false")
+	lease, err := runtime.Acquire(context.Background(), "rank_udf", "L2_rerank")
+	require.Error(t, err)
+	assert.Nil(t, lease)
+	assert.ErrorIs(t, err, merr.ErrServiceInternal)
+	assert.ErrorContains(t, err, "function.pyUDF.enabled is false")
+
+	runtime = NewUnavailableRuntime(" ")
+	_, err = runtime.Acquire(context.Background(), "rank_udf", "L2_rerank")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "embedded PyUDF runtime is unavailable")
 }

@@ -16,10 +16,80 @@
 
 #include "pyudf/pyudf_c.h"
 
+#include <exception>
 #include <memory>
 
 #include "common/EasyAssert.h"
 #include "pyudf/pyudf.h"
+#include "pyudf/pyudf_runtime.h"
+
+bool
+PyUDFRuntimeBuildEnabled(void) {
+    return milvus::pyudf::RuntimeBuildEnabled();
+}
+
+CStatus
+InitializePyUDFRuntime(void) {
+    try {
+        milvus::pyudf::InitializeRuntime();
+        return milvus::SuccessCStatus();
+    } catch (const std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    } catch (...) {
+        return milvus::FailureCStatus(
+            milvus::UnexpectedError,
+            "py_udf: unknown exception while initializing runtime");
+    }
+}
+
+CStatus
+LoadPyUDFResource(const uint8_t* serialized_request,
+                  uint64_t serialized_request_len,
+                  CPyUDFResource* resource) {
+    if (resource == nullptr) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: resource output pointer is nil");
+    }
+    *resource = nullptr;
+
+    try {
+        auto native_resource = milvus::pyudf::LoadResource(
+            serialized_request, serialized_request_len);
+        if (native_resource == nullptr) {
+            return milvus::FailureCStatus(
+                milvus::UnexpectedError,
+                "py_udf: runtime returned a successful null resource");
+        }
+        *resource = static_cast<CPyUDFResource>(native_resource.release());
+        return milvus::SuccessCStatus();
+    } catch (const std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    } catch (...) {
+        return milvus::FailureCStatus(
+            milvus::UnexpectedError,
+            "py_udf: unknown exception while loading resource");
+    }
+}
+
+CStatus
+DeletePyUDFResource(CPyUDFResource resource) {
+    auto native_resource = std::unique_ptr<milvus::pyudf::PyUDFResource>(
+        static_cast<milvus::pyudf::PyUDFResource*>(resource));
+    if (native_resource == nullptr) {
+        return milvus::SuccessCStatus();
+    }
+
+    try {
+        native_resource->Close();
+        return milvus::SuccessCStatus();
+    } catch (const std::exception& e) {
+        return milvus::FailureCStatus(&e);
+    } catch (...) {
+        return milvus::FailureCStatus(
+            milvus::UnexpectedError,
+            "py_udf: unknown exception while deleting resource");
+    }
+}
 
 CStatus
 NewPyUDFInvocation(int32_t num_inputs,
