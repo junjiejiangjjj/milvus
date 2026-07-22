@@ -28,6 +28,12 @@ typedef void* CPyUDFInvocation;
 typedef void* CPyUDFResult;
 typedef void* CPyUDFResource;
 
+// Function-pipeline code shared with merr.ErrFunctionFailed. This is not a
+// segcore-family code; all other failures preserve their native ErrorCode.
+typedef enum CPyUDFErrorCode {
+    PyUDFErrorCodeFunctionFailed = 2400,
+} CPyUDFErrorCode;
+
 // Returns whether this core library was built with the embedded CPython runtime.
 bool
 PyUDFRuntimeBuildEnabled(void);
@@ -79,6 +85,16 @@ PyUDFInvocationInputSchema(CPyUDFInvocation invocation,
 void
 DeletePyUDFInvocation(CPyUDFInvocation invocation);
 
+// Runs one invocation through an already loaded resource. Resource and
+// invocation handles remain caller-owned. On failure, *result is always null.
+CStatus
+RunPyUDFResource(CPyUDFResource resource,
+                 CPyUDFInvocation invocation,
+                 const uint8_t* serialized_params,
+                 uint64_t serialized_params_len,
+                 CPyUDFResult* result);
+
+// Synchronous identity helper used only to verify Arrow C Data handles.
 CStatus
 RunPyUDFIdentity(CPyUDFInvocation invocation, CPyUDFResult* result);
 

@@ -19,10 +19,12 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 
 #include "common/arrow_c_data_c.h"
 #include "pyudf/pyudf.h"
+#include "pyudf/pyudf_runtime.h"
 
 namespace {
 
@@ -73,6 +75,16 @@ FreeStatus(CStatus* status) {
     }
 }
 
+int
+StatusCode(const CStatus& status) {
+    return status.error_code;
+}
+
+const char*
+StatusMessage(const CStatus& status) {
+    return status.error_msg;
+}
+
 CPyUDFInvocation
 NewInvocation(int32_t num_inputs,
               int32_t num_chunks,
@@ -80,11 +92,54 @@ NewInvocation(int32_t num_inputs,
     CPyUDFInvocation invocation = nullptr;
     auto status =
         NewPyUDFInvocation(num_inputs, num_chunks, chunk_sizes, &invocation);
-    EXPECT_EQ(status.error_code, 0) << status.error_msg;
+    EXPECT_EQ(StatusCode(status), 0) << StatusMessage(status);
     EXPECT_NE(invocation, nullptr);
     FreeStatus(&status);
     return invocation;
 }
+
+class TestPyUDFResource : public milvus::pyudf::PyUDFResource {
+ public:
+    enum class Behavior {
+        kIdentity,
+        kThrows,
+        kFunctionThrows,
+        kNullResult,
+    };
+
+    explicit TestPyUDFResource(Behavior behavior) : behavior_(behavior) {
+    }
+
+    std::unique_ptr<milvus::pyudf::PyUDFResult>
+    Run(milvus::pyudf::PyUDFInvocation& invocation,
+        const uint8_t*,
+        uint64_t) override {
+        ++run_calls;
+        switch (behavior_) {
+            case Behavior::kIdentity:
+                return invocation.RunIdentity();
+            case Behavior::kThrows:
+                throw std::runtime_error("injected resource run failure");
+            case Behavior::kFunctionThrows:
+                throw milvus::pyudf::PyUDFFunctionError(
+                    "injected function run failure");
+            case Behavior::kNullResult:
+                return nullptr;
+        }
+        throw std::runtime_error("unreachable resource behavior");
+    }
+
+    void
+    Close() override {
+        ++close_calls;
+    }
+
+    int run_calls = 0;
+    int close_calls = 0;
+
+ private:
+    Behavior behavior_;
+};
 
 TEST(PyUDFHandlesCTest, InvocationCopiesMetadataAndKeepsStableSlots) {
     int64_t chunk_sizes[] = {2, 0, 5};
@@ -125,24 +180,24 @@ TEST(PyUDFHandlesCTest, InvocationAllowsZeroChunks) {
 TEST(PyUDFHandlesCTest, InvocationRejectsInvalidArguments) {
     CPyUDFInvocation invocation = reinterpret_cast<CPyUDFInvocation>(0x1);
     auto status = NewPyUDFInvocation(-1, 1, nullptr, &invocation);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     EXPECT_EQ(invocation, nullptr);
     FreeStatus(&status);
 
     status = NewPyUDFInvocation(1, 1, nullptr, &invocation);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     EXPECT_EQ(invocation, nullptr);
     FreeStatus(&status);
 
     int64_t negative_size[] = {-1};
     status = NewPyUDFInvocation(1, 1, negative_size, &invocation);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     EXPECT_EQ(invocation, nullptr);
     FreeStatus(&status);
 
     int64_t chunk_size[] = {1};
     status = NewPyUDFInvocation(1, 1, chunk_size, nullptr);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     FreeStatus(&status);
 }
 
@@ -182,7 +237,7 @@ TEST(PyUDFHandlesCTest, IdentityMovesDescriptorsAndReleasesOnce) {
 
     CPyUDFResult result = nullptr;
     auto status = RunPyUDFIdentity(invocation, &result);
-    ASSERT_EQ(status.error_code, 0) << status.error_msg;
+    ASSERT_EQ(StatusCode(status), 0) << StatusMessage(status);
     ASSERT_NE(result, nullptr);
     FreeStatus(&status);
 
@@ -227,7 +282,7 @@ TEST(PyUDFHandlesCTest, IdentityRejectsUnpopulatedSlotsAtomically) {
 
     CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
     auto status = RunPyUDFIdentity(invocation, &result);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     EXPECT_EQ(result, nullptr);
     FreeStatus(&status);
 
@@ -246,15 +301,122 @@ TEST(PyUDFHandlesCTest, IdentityRejectsUnpopulatedSlotsAtomically) {
 TEST(PyUDFHandlesCTest, IdentityRejectsNullArguments) {
     CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
     auto status = RunPyUDFIdentity(nullptr, &result);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     EXPECT_EQ(result, nullptr);
     FreeStatus(&status);
 
     int64_t chunk_sizes[] = {1};
     auto invocation = NewInvocation(1, 1, chunk_sizes);
     status = RunPyUDFIdentity(invocation, nullptr);
-    EXPECT_NE(status.error_code, 0);
+    EXPECT_NE(StatusCode(status), 0);
     FreeStatus(&status);
+    DeletePyUDFInvocation(invocation);
+}
+
+TEST(PyUDFResourceRunCTest, MovesDescriptorsAndKeepsHandlesCallerOwned) {
+    int64_t chunk_sizes[] = {2};
+    auto invocation = NewInvocation(1, 1, chunk_sizes);
+    ReleaseCounter counter;
+    Populate(PyUDFInvocationInputArray(invocation, 0, 0),
+             PyUDFInvocationInputSchema(invocation, 0, 0),
+             &counter);
+    TestPyUDFResource resource(TestPyUDFResource::Behavior::kIdentity);
+
+    CPyUDFResult result = nullptr;
+    auto status = RunPyUDFResource(&resource, invocation, nullptr, 0, &result);
+    ASSERT_EQ(StatusCode(status), 0) << StatusMessage(status);
+    ASSERT_NE(result, nullptr);
+    FreeStatus(&status);
+    EXPECT_EQ(resource.run_calls, 1);
+    EXPECT_EQ(PyUDFInvocationInputArray(invocation, 0, 0)->release, nullptr);
+    EXPECT_NE(PyUDFResultArray(result, 0, 0)->release, nullptr);
+
+    DeletePyUDFInvocation(invocation);
+    EXPECT_EQ(counter.arrays, 0);
+    EXPECT_EQ(counter.schemas, 0);
+    DeletePyUDFResult(result);
+    EXPECT_EQ(counter.arrays, 1);
+    EXPECT_EQ(counter.schemas, 1);
+
+    resource.Close();
+    EXPECT_EQ(resource.close_calls, 1);
+}
+
+TEST(PyUDFResourceRunCTest, FailureKeepsResultNullAndInvocationOwned) {
+    int64_t chunk_sizes[] = {1};
+    auto invocation = NewInvocation(1, 1, chunk_sizes);
+    ReleaseCounter counter;
+    Populate(PyUDFInvocationInputArray(invocation, 0, 0),
+             PyUDFInvocationInputSchema(invocation, 0, 0),
+             &counter);
+    TestPyUDFResource resource(TestPyUDFResource::Behavior::kThrows);
+
+    CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
+    auto status = RunPyUDFResource(&resource, invocation, nullptr, 0, &result);
+    EXPECT_EQ(StatusCode(status), 2001);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_NE(PyUDFInvocationInputArray(invocation, 0, 0)->release, nullptr);
+    EXPECT_NE(PyUDFInvocationInputSchema(invocation, 0, 0)->release, nullptr);
+    FreeStatus(&status);
+
+    DeletePyUDFInvocation(invocation);
+    EXPECT_EQ(counter.arrays, 1);
+    EXPECT_EQ(counter.schemas, 1);
+}
+
+TEST(PyUDFResourceRunCTest, FunctionFailureUsesFormalErrorCode) {
+    int64_t chunk_sizes[] = {1};
+    auto invocation = NewInvocation(1, 1, chunk_sizes);
+    TestPyUDFResource resource(TestPyUDFResource::Behavior::kFunctionThrows);
+
+    CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
+    auto status = RunPyUDFResource(&resource, invocation, nullptr, 0, &result);
+    EXPECT_EQ(StatusCode(status), PyUDFErrorCodeFunctionFailed);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_NE(std::string(StatusMessage(status)).find("function run failure"),
+              std::string::npos);
+    FreeStatus(&status);
+
+    DeletePyUDFInvocation(invocation);
+}
+
+TEST(PyUDFResourceRunCTest, RejectsNullResultAndNullHandles) {
+    int64_t chunk_sizes[] = {1};
+    auto invocation = NewInvocation(1, 1, chunk_sizes);
+    TestPyUDFResource identity(TestPyUDFResource::Behavior::kIdentity);
+
+    auto status = RunPyUDFResource(&identity, invocation, nullptr, 0, nullptr);
+    EXPECT_NE(StatusCode(status), 0);
+    EXPECT_EQ(identity.run_calls, 0);
+    FreeStatus(&status);
+
+    CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
+    status = RunPyUDFResource(nullptr, invocation, nullptr, 0, &result);
+    EXPECT_NE(StatusCode(status), 0);
+    EXPECT_EQ(result, nullptr);
+    FreeStatus(&status);
+
+    result = reinterpret_cast<CPyUDFResult>(0x1);
+    status = RunPyUDFResource(&identity, nullptr, nullptr, 0, &result);
+    EXPECT_NE(StatusCode(status), 0);
+    EXPECT_EQ(result, nullptr);
+    FreeStatus(&status);
+
+    DeletePyUDFInvocation(invocation);
+}
+
+TEST(PyUDFResourceRunCTest, RejectsSuccessfulNullResult) {
+    int64_t chunk_sizes[] = {1};
+    auto invocation = NewInvocation(1, 1, chunk_sizes);
+    TestPyUDFResource resource(TestPyUDFResource::Behavior::kNullResult);
+
+    CPyUDFResult result = reinterpret_cast<CPyUDFResult>(0x1);
+    auto status = RunPyUDFResource(&resource, invocation, nullptr, 0, &result);
+    EXPECT_NE(StatusCode(status), 0);
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(resource.run_calls, 1);
+    FreeStatus(&status);
+
     DeletePyUDFInvocation(invocation);
 }
 
@@ -319,22 +481,22 @@ TEST(PyUDFRuntimeCTest, BuildCapabilityAndBoundaryBehavior) {
     CPyUDFResource resource = reinterpret_cast<CPyUDFResource>(0x1);
     if (PyUDFRuntimeBuildEnabled()) {
         auto status = LoadPyUDFResource(nullptr, 0, &resource);
-        EXPECT_NE(status.error_code, 0);
+        EXPECT_NE(StatusCode(status), 0);
         EXPECT_EQ(resource, nullptr);
         FreeStatus(&status);
     } else {
         auto status = InitializePyUDFRuntime();
-        EXPECT_EQ(status.error_code, 2003);
+        EXPECT_EQ(StatusCode(status), 2003);
         FreeStatus(&status);
 
         status = LoadPyUDFResource(nullptr, 0, &resource);
-        EXPECT_EQ(status.error_code, 2003);
+        EXPECT_EQ(StatusCode(status), 2003);
         EXPECT_EQ(resource, nullptr);
         FreeStatus(&status);
     }
 
     auto status = DeletePyUDFResource(nullptr);
-    EXPECT_EQ(status.error_code, 0);
+    EXPECT_EQ(StatusCode(status), 0);
     FreeStatus(&status);
 }
 

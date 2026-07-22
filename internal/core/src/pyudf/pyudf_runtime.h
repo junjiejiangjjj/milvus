@@ -18,8 +18,17 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 
 namespace milvus::pyudf {
+
+class PyUDFFunctionError : public std::runtime_error {
+ public:
+    using std::runtime_error::runtime_error;
+};
+
+class PyUDFInvocation;
+class PyUDFResult;
 
 // PyUDFResource is deliberately opaque at the C ABI. The enabled runtime owns
 // CPython references behind this interface; the disabled implementation never
@@ -35,6 +44,14 @@ class PyUDFResource {
     PyUDFResource(PyUDFResource&&) = delete;
     PyUDFResource&
     operator=(PyUDFResource&&) = delete;
+
+    // Run does not own the invocation container. It may move populated Arrow
+    // descriptors from the invocation into the returned result. Failures before
+    // descriptor movement leave invocation ownership unchanged.
+    virtual std::unique_ptr<PyUDFResult>
+    Run(PyUDFInvocation& invocation,
+        const uint8_t* serialized_params,
+        uint64_t serialized_params_len) = 0;
 
     // Close is idempotent. Implementations must release every owned reference
     // before throwing, even when an optional Python close method fails.

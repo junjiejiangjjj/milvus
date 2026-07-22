@@ -56,6 +56,9 @@ class PyUDFInvocation {
     ArrowSchema*
     input_schema(int32_t input_index, int32_t chunk_index);
 
+    void
+    ValidatePopulated() const;
+
     std::unique_ptr<PyUDFResult>
     RunIdentity();
 

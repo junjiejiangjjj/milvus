@@ -18,15 +18,29 @@
 
 RUNTIME_API_VERSION = 1
 
+from .arrow_io import (
+    PyUDFArrowError,
+    export_array,
+    import_array,
+    make_chunked_array,
+)
 from .context import PyUDFContext
+from .executor import PyUDFExecutionError, freeze_params, run_transform_query
 from .loader import PyUDFLoadError, close_instances, load_instances
 from .wrapper import LoadedPyUDFInstance
 
 __all__ = [
     "RUNTIME_API_VERSION",
     "LoadedPyUDFInstance",
+    "PyUDFArrowError",
     "PyUDFContext",
+    "PyUDFExecutionError",
     "PyUDFLoadError",
     "close_instances",
+    "export_array",
+    "freeze_params",
+    "import_array",
     "load_instances",
+    "make_chunked_array",
+    "run_transform_query",
 ]

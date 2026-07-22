@@ -177,10 +177,15 @@ if (BUILD_UNIT_TEST STREQUAL "ON" AND MILVUS_ENABLE_PY_UDF)
         trusted-wrapper-incompatible-api-version
         trusted-wrapper-non-callable-loader
         trusted-wrapper-non-callable-closer
+        trusted-wrapper-missing-freeze-params
+        trusted-wrapper-non-callable-freeze-params
+        trusted-wrapper-missing-run-transform-query
+        trusted-wrapper-non-callable-run-transform-query
         request-validation
         python-load-exception
         invalid-python-load-result
         valid-load-and-close
+        resource-run-identity-and-closed-state
         close-exception
         concurrent-idempotent-close
     )

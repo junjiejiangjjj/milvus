@@ -23,6 +23,20 @@
 #include "pyudf/pyudf.h"
 #include "pyudf/pyudf_runtime.h"
 
+namespace {
+
+CStatus
+PyUDFExceptionToCStatus(const std::exception& error) {
+    if (dynamic_cast<const milvus::pyudf::PyUDFFunctionError*>(&error) !=
+        nullptr) {
+        return milvus::FailureCStatus(PyUDFErrorCodeFunctionFailed,
+                                      error.what());
+    }
+    return milvus::FailureCStatus(&error);
+}
+
+}  // namespace
+
 bool
 PyUDFRuntimeBuildEnabled(void) {
     return milvus::pyudf::RuntimeBuildEnabled();
@@ -34,7 +48,7 @@ InitializePyUDFRuntime(void) {
         milvus::pyudf::InitializeRuntime();
         return milvus::SuccessCStatus();
     } catch (const std::exception& e) {
-        return milvus::FailureCStatus(&e);
+        return PyUDFExceptionToCStatus(e);
     } catch (...) {
         return milvus::FailureCStatus(
             milvus::UnexpectedError,
@@ -63,7 +77,7 @@ LoadPyUDFResource(const uint8_t* serialized_request,
         *resource = static_cast<CPyUDFResource>(native_resource.release());
         return milvus::SuccessCStatus();
     } catch (const std::exception& e) {
-        return milvus::FailureCStatus(&e);
+        return PyUDFExceptionToCStatus(e);
     } catch (...) {
         return milvus::FailureCStatus(
             milvus::UnexpectedError,
@@ -83,7 +97,7 @@ DeletePyUDFResource(CPyUDFResource resource) {
         native_resource->Close();
         return milvus::SuccessCStatus();
     } catch (const std::exception& e) {
-        return milvus::FailureCStatus(&e);
+        return PyUDFExceptionToCStatus(e);
     } catch (...) {
         return milvus::FailureCStatus(
             milvus::UnexpectedError,
@@ -151,6 +165,49 @@ PyUDFInvocationInputSchema(CPyUDFInvocation invocation,
 void
 DeletePyUDFInvocation(CPyUDFInvocation invocation) {
     delete static_cast<milvus::pyudf::PyUDFInvocation*>(invocation);
+}
+
+CStatus
+RunPyUDFResource(CPyUDFResource resource,
+                 CPyUDFInvocation invocation,
+                 const uint8_t* serialized_params,
+                 uint64_t serialized_params_len,
+                 CPyUDFResult* result) {
+    if (result == nullptr) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: result output pointer is nil");
+    }
+    *result = nullptr;
+
+    auto native_resource = static_cast<milvus::pyudf::PyUDFResource*>(resource);
+    if (native_resource == nullptr) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: resource is nil");
+    }
+    auto native_invocation =
+        static_cast<milvus::pyudf::PyUDFInvocation*>(invocation);
+    if (native_invocation == nullptr) {
+        return milvus::FailureCStatus(milvus::UnexpectedError,
+                                      "py_udf: invocation is nil");
+    }
+
+    try {
+        auto native_result = native_resource->Run(
+            *native_invocation, serialized_params, serialized_params_len);
+        if (native_result == nullptr) {
+            return milvus::FailureCStatus(
+                milvus::UnexpectedError,
+                "py_udf: resource returned a successful null result");
+        }
+        *result = static_cast<CPyUDFResult>(native_result.release());
+        return milvus::SuccessCStatus();
+    } catch (const std::exception& e) {
+        return PyUDFExceptionToCStatus(e);
+    } catch (...) {
+        return milvus::FailureCStatus(
+            milvus::UnexpectedError,
+            "py_udf: unknown exception while running resource");
+    }
 }
 
 CStatus

@@ -20,21 +20,32 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 import importlib
+from types import MappingProxyType
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 import zipfile
 
+import pyarrow as pa
+from pyarrow.cffi import ffi
+
 _RUNTIME_ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(_RUNTIME_ROOT))
 
 from milvus_pyudf_runtime import (  # noqa: E402
     RUNTIME_API_VERSION,
+    PyUDFArrowError,
     PyUDFContext,
+    PyUDFExecutionError,
     PyUDFLoadError,
     close_instances,
+    export_array,
+    freeze_params,
+    import_array,
     load_instances,
+    make_chunked_array,
+    run_transform_query,
 )
 from milvus_pyudf_runtime import loader  # noqa: E402
 
@@ -77,6 +88,136 @@ class WheelFixture:
 class PyUDFRuntimeTest(unittest.TestCase):
     def test_runtime_api_version(self) -> None:
         self.assertEqual(RUNTIME_API_VERSION, 1)
+
+    def test_freeze_params_is_recursively_immutable(self) -> None:
+        params = freeze_params(
+            {
+                "bool": True,
+                "int": 42,
+                "double": 1.25,
+                "string": "value",
+                "bytes": b"\x00\xff",
+                "array": [1, {"nested": "value"}],
+            }
+        )
+        self.assertIsInstance(params, MappingProxyType)
+        self.assertEqual(params["array"][0], 1)
+        self.assertEqual(params["array"][1]["nested"], "value")
+        self.assertIsInstance(params["array"][1], MappingProxyType)
+        with self.assertRaises(TypeError):
+            params["new"] = 1  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            params["array"][1]["nested"] = "changed"  # type: ignore[index]
+
+    def test_run_transform_query_validates_outputs_and_preserves_cause(self) -> None:
+        class UDF:
+            def transform_query(self, params, columns):
+                return [pa.array([columns[0][0].as_py() + params["delta"]])]
+
+        loaded = __import__("milvus_pyudf_runtime").LoadedPyUDFInstance(
+            instance=UDF(),
+            callable_name="transform_query",
+            concurrency_mode="serialized",
+            close=None,
+        )
+        outputs = run_transform_query(
+            loaded,
+            freeze_params({"delta": 2}),
+            [pa.array([3])],
+            1,
+        )
+        self.assertEqual(outputs[0].to_pylist(), [5])
+
+        class FailingUDF:
+            def transform_query(self, params, columns):
+                raise ValueError("boom")
+
+        failing = __import__("milvus_pyudf_runtime").LoadedPyUDFInstance(
+            instance=FailingUDF(),
+            callable_name="transform_query",
+            concurrency_mode="serialized",
+            close=None,
+        )
+        with self.assertRaisesRegex(PyUDFExecutionError, "raised") as captured:
+            run_transform_query(failing, freeze_params({}), [pa.array([1])], 1)
+        self.assertIsInstance(captured.exception.__cause__, ValueError)
+
+    def test_run_transform_query_rejects_invalid_contracts(self) -> None:
+        class UDF:
+            def __init__(self, result):
+                self.result = result
+
+            def transform_query(self, params, columns):
+                return self.result
+
+        def loaded(result, callable_name="transform_query"):
+            return __import__("milvus_pyudf_runtime").LoadedPyUDFInstance(
+                instance=UDF(result),
+                callable_name=callable_name,
+                concurrency_mode="serialized",
+                close=None,
+            )
+
+        params = freeze_params({})
+        columns = [pa.array([1])]
+        invalid = [
+            (loaded(pa.array([1])), "return a sequence"),
+            (loaded([[1]]), "must be pyarrow.Array"),
+            (loaded([pa.chunked_array([[1]])]), "must be pyarrow.Array"),
+            (loaded([pa.array([1, 2])]), "2 rows, expected 1"),
+            (loaded([pa.array([1])], "transform"), "does not implement"),
+        ]
+        for value, message in invalid:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(PyUDFExecutionError, message):
+                    run_transform_query(value, params, columns, 1)
+
+    def test_arrow_c_data_round_trip_preserves_views_and_nulls(self) -> None:
+        base = pa.array(["alpha", "beta", None])
+        value = base.slice(1, 2)
+        c_array = ffi.new("struct ArrowArray*")
+        c_schema = ffi.new("struct ArrowSchema*")
+        array_address = int(ffi.cast("uintptr_t", c_array))
+        schema_address = int(ffi.cast("uintptr_t", c_schema))
+
+        export_array(value, array_address, schema_address)
+        imported = import_array(array_address, schema_address)
+        self.assertEqual(imported.to_pylist(), ["beta", None])
+        self.assertEqual(imported.offset, 1)
+        self.assertEqual(c_array.release, ffi.NULL)
+        self.assertEqual(c_schema.release, ffi.NULL)
+
+    def test_arrow_chunked_builder_requires_arrow_arrays_of_one_type(self) -> None:
+        chunked = make_chunked_array([pa.array([1, None]), pa.array([], type=pa.int64())])
+        self.assertEqual(chunked.to_pylist(), [1, None])
+        self.assertEqual(chunked.num_chunks, 2)
+        with self.assertRaisesRegex(PyUDFArrowError, "only pyarrow.Array"):
+            make_chunked_array([pa.array([1]), [2]])  # type: ignore[list-item]
+        with self.assertRaisesRegex(PyUDFArrowError, "cannot build"):
+            make_chunked_array([pa.array([1]), pa.array(["x"])])
+
+    def test_arrow_helpers_reject_invalid_addresses_and_objects(self) -> None:
+        with self.assertRaisesRegex(PyUDFArrowError, "positive integer"):
+            import_array(0, 1)
+        with self.assertRaisesRegex(PyUDFArrowError, "positive integer"):
+            export_array(pa.array([1]), 1, False)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(PyUDFArrowError, "pyarrow.Array"):
+            export_array([1], 1, 1)  # type: ignore[arg-type]
+
+    def test_arrow_import_failure_consumes_descriptors(self) -> None:
+        value = pa.array([1, 2])
+        c_array = ffi.new("struct ArrowArray*")
+        c_schema = ffi.new("struct ArrowSchema*")
+        array_address = int(ffi.cast("uintptr_t", c_array))
+        schema_address = int(ffi.cast("uintptr_t", c_schema))
+        value._export_to_c(array_address, schema_address)
+        invalid_format = ffi.new("char[]", b"invalid")
+        c_schema.format = invalid_format
+
+        with self.assertRaises(pa.ArrowInvalid):
+            import_array(array_address, schema_address)
+        self.assertEqual(c_array.release, ffi.NULL)
+        self.assertEqual(c_schema.release, ffi.NULL)
 
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()

@@ -70,10 +70,12 @@ type Cache struct {
 	loadTimeout time.Duration
 	closed      atomic.Bool
 
-	mu        sync.RWMutex
-	resources map[string]fileresource.ResolvedFileResource
-	loaded    map[cacheKey]*cachedResource
-	sf        conc.Singleflight[*cachedResource]
+	mu              sync.RWMutex
+	snapshotReady   bool
+	snapshotVersion uint64
+	resources       map[string]fileresource.ResolvedFileResource
+	loaded          map[cacheKey]*cachedResource
+	sf              conc.Singleflight[*cachedResource]
 }
 
 type cachedResource struct {
@@ -141,6 +143,12 @@ func (c *Cache) OnFileResourceSync(event fileresource.SyncEvent) error {
 		c.mu.Unlock()
 		return nil
 	}
+	if c.snapshotReady && event.Version <= c.snapshotVersion {
+		c.mu.Unlock()
+		return nil
+	}
+	c.snapshotReady = true
+	c.snapshotVersion = event.Version
 	c.resources = resources
 	evicted := make([]*cachedResource, 0)
 	for key, cached := range c.loaded {
@@ -216,8 +224,12 @@ func (c *Cache) resolveResource(name string) (fileresource.ResolvedFileResource,
 		return fileresource.ResolvedFileResource{}, merr.WrapErrServiceInternalMsg("py_udf: cache is closed")
 	}
 	c.mu.RLock()
+	ready := c.snapshotReady
 	resource, ok := c.resources[name]
 	c.mu.RUnlock()
+	if !ready {
+		return fileresource.ResolvedFileResource{}, merr.WrapErrServiceUnavailableMsg("py_udf: file resource snapshot is not ready")
+	}
 	if !ok {
 		return fileresource.ResolvedFileResource{}, merr.WrapErrParameterInvalidMsg("py_udf: file resource %q not found", name)
 	}

@@ -82,7 +82,29 @@ func newTestCache(t *testing.T, loader ResourceLoader) *Cache {
 
 func syncCacheResource(t *testing.T, cache *Cache, resources ...*fileresource.ResolvedFileResource) {
 	t.Helper()
-	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 1, Resources: resources}))
+	cache.mu.RLock()
+	version := cache.snapshotVersion + 1
+	cache.mu.RUnlock()
+	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: version, Resources: resources}))
+}
+
+func TestCacheSnapshotReadinessAndVersion(t *testing.T) {
+	cache := newTestCache(t, nil)
+	_, err := cache.Acquire(context.Background(), "rank_udf", "L2_rerank")
+	assert.ErrorIs(t, err, merr.ErrServiceUnavailable)
+	assert.True(t, merr.IsRetryableErr(err))
+
+	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: cache.snapshotVersion + 1}))
+	_, err = cache.Acquire(context.Background(), "rank_udf", "L2_rerank")
+	assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+
+	newResource := testWheelResource(2, "rank_udf")
+	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 3, Resources: []*fileresource.ResolvedFileResource{newResource}}))
+	oldResource := testWheelResource(1, "rank_udf")
+	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 1, Resources: []*fileresource.ResolvedFileResource{oldResource}}))
+	resolved, err := cache.resolveResource("rank_udf")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resolved.ID)
 }
 
 func TestCacheResourceIndex(t *testing.T) {
@@ -204,7 +226,7 @@ func TestCacheLoadsDifferentStages(t *testing.T) {
 	l1, err := cache.Acquire(context.Background(), "rank_udf", "L1_rerank")
 	require.NoError(t, err)
 	l1.Release()
-	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 2, Resources: []*fileresource.ResolvedFileResource{resource}}))
+	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: cache.snapshotVersion + 1, Resources: []*fileresource.ResolvedFileResource{resource}}))
 
 	assert.Equal(t, int64(2), loadCount.Load())
 	assert.Equal(t, 2, cache.len())
@@ -225,7 +247,7 @@ func TestCacheEvictionWaitsForLeases(t *testing.T) {
 	second, err := cache.Acquire(context.Background(), "rank_udf", "L2_rerank")
 	require.NoError(t, err)
 
-	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 2}))
+	require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: cache.snapshotVersion + 1}))
 	assert.Equal(t, 0, cache.len())
 	assert.Equal(t, int64(0), resource.closeCount.Load())
 	first.Release()
@@ -244,7 +266,7 @@ func TestCacheRetriesWhenStaleLoadFails(t *testing.T) {
 	cache = newTestCache(t, &fakeResourceLoader{load: func(_ context.Context, resource fileresource.ResolvedFileResource, _ string) (LoadedResource, error) {
 		if loadCount.Add(1) == 1 {
 			require.Equal(t, int64(1), resource.ID)
-			require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 2, Resources: []*fileresource.ResolvedFileResource{resourceV2}}))
+			require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: cache.snapshotVersion + 1, Resources: []*fileresource.ResolvedFileResource{resourceV2}}))
 			return nil, merr.WrapErrServiceInternalMsg("old wheel was removed")
 		}
 		require.Equal(t, int64(2), resource.ID)
@@ -268,7 +290,7 @@ func TestCacheRetriesAfterSyncDuringLoad(t *testing.T) {
 	loader := &fakeResourceLoader{load: func(_ context.Context, resource fileresource.ResolvedFileResource, _ string) (LoadedResource, error) {
 		if loadCount.Add(1) == 1 {
 			require.Equal(t, int64(1), resource.ID)
-			require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: 2, Resources: []*fileresource.ResolvedFileResource{resourceV2}}))
+			require.NoError(t, cache.OnFileResourceSync(fileresource.SyncEvent{Version: cache.snapshotVersion + 1, Resources: []*fileresource.ResolvedFileResource{resourceV2}}))
 			return oldResource, nil
 		}
 		require.Equal(t, int64(2), resource.ID)

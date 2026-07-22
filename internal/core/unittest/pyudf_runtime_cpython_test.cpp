@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "pb/cgo_msg.pb.h"
+#include "pyudf/pyudf.h"
 #include "pyudf/pyudf_c.h"
 #include "pyudf/pyudf_runtime.h"
 
@@ -45,6 +46,10 @@ enum class WrapperMode {
     kIncompatibleApiVersion,
     kNonCallableLoader,
     kNonCallableCloser,
+    kMissingFreezeParams,
+    kNonCallableFreezeParams,
+    kMissingRunTransformQuery,
+    kNonCallableRunTransformQuery,
 };
 
 enum class LoadBehavior {
@@ -104,12 +109,19 @@ ExpectSuccess(CStatus status) {
 }
 
 bool
-ExpectFailure(CStatus status, std::string_view expected_message) {
+ExpectFailure(CStatus status,
+              std::string_view expected_message,
+              int expected_code = -1) {
     const auto message = StatusMessage(status);
-    const bool failed = status.error_code != 0;
+    const auto code = status.error_code;
+    const bool failed = code != 0;
     FreeStatus(&status);
     if (!failed) {
         return Fail("expected failure");
+    }
+    if (expected_code >= 0 && code != expected_code) {
+        return Fail("expected failure code " + std::to_string(expected_code) +
+                    ", got " + std::to_string(code));
     }
     if (message.find(expected_message) == std::string::npos) {
         return Fail("failure did not contain '" +
@@ -183,9 +195,111 @@ CloseInstances(PyObject*, PyObject* arguments) {
     Py_RETURN_NONE;
 }
 
+PyObject*
+CallPyArrowMethod(const char* type_name,
+                  const char* method_name,
+                  PyObject* arguments) {
+    auto* pyarrow = PyImport_ImportModule("pyarrow");
+    if (pyarrow == nullptr) {
+        return nullptr;
+    }
+    auto* type = PyObject_GetAttrString(pyarrow, type_name);
+    Py_DECREF(pyarrow);
+    if (type == nullptr) {
+        return nullptr;
+    }
+    auto* method = PyObject_GetAttrString(type, method_name);
+    Py_DECREF(type);
+    if (method == nullptr) {
+        return nullptr;
+    }
+    auto* result = PyObject_CallObject(method, arguments);
+    Py_DECREF(method);
+    return result;
+}
+
+PyObject*
+ImportArray(PyObject*, PyObject* arguments) {
+    return CallPyArrowMethod("Array", "_import_from_c", arguments);
+}
+
+PyObject*
+MakeChunkedArray(PyObject*, PyObject* arguments) {
+    auto* pyarrow = PyImport_ImportModule("pyarrow");
+    if (pyarrow == nullptr) {
+        return nullptr;
+    }
+    auto* callable = PyObject_GetAttrString(pyarrow, "chunked_array");
+    Py_DECREF(pyarrow);
+    if (callable == nullptr) {
+        return nullptr;
+    }
+    auto* result = PyObject_CallObject(callable, arguments);
+    Py_DECREF(callable);
+    return result;
+}
+
+PyObject*
+ExportArray(PyObject*, PyObject* arguments) {
+    PyObject* array = nullptr;
+    PyObject* array_address = nullptr;
+    PyObject* schema_address = nullptr;
+    if (!PyArg_UnpackTuple(arguments,
+                           "export_array",
+                           3,
+                           3,
+                           &array,
+                           &array_address,
+                           &schema_address)) {
+        return nullptr;
+    }
+    return PyObject_CallMethod(
+        array, "_export_to_c", "OO", array_address, schema_address);
+}
+
+PyObject*
+FreezeParams(PyObject*, PyObject* arguments) {
+    PyObject* params = nullptr;
+    if (!PyArg_UnpackTuple(arguments, "freeze_params", 1, 1, &params)) {
+        return nullptr;
+    }
+    return Py_NewRef(params);
+}
+
+PyObject*
+RunTransformQuery(PyObject*, PyObject* arguments) {
+    PyObject* loaded = nullptr;
+    PyObject* params = nullptr;
+    PyObject* columns = nullptr;
+    PyObject* expected_rows = nullptr;
+    if (!PyArg_UnpackTuple(arguments,
+                           "run_transform_query",
+                           4,
+                           4,
+                           &loaded,
+                           &params,
+                           &columns,
+                           &expected_rows)) {
+        return nullptr;
+    }
+    static_cast<void>(loaded);
+    static_cast<void>(params);
+    static_cast<void>(expected_rows);
+    if (!PyTuple_Check(columns)) {
+        PyErr_SetString(PyExc_TypeError, "columns must be a tuple");
+        return nullptr;
+    }
+    return PySequence_Tuple(columns);
+}
+
 PyMethodDef wrapper_methods[] = {
     {"load_instances", LoadInstances, METH_VARARGS, nullptr},
     {"close_instances", CloseInstances, METH_VARARGS, nullptr},
+    {"import_array", ImportArray, METH_VARARGS, nullptr},
+    {"make_chunked_array", MakeChunkedArray, METH_VARARGS, nullptr},
+    {"export_array", ExportArray, METH_VARARGS, nullptr},
+    {"freeze_params", FreezeParams, METH_VARARGS, nullptr},
+    {"run_transform_query", RunTransformQuery, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };
 
@@ -244,6 +358,27 @@ PyInit_milvus_pyudf_runtime(void) {
         Py_DECREF(module);
         return nullptr;
     }
+    if (wrapper_mode == WrapperMode::kMissingFreezeParams &&
+        PyObject_DelAttrString(module, "freeze_params") != 0) {
+        Py_DECREF(module);
+        return nullptr;
+    }
+    if (wrapper_mode == WrapperMode::kNonCallableFreezeParams &&
+        !SetModuleAttribute(module, "freeze_params", PyLong_FromLong(1))) {
+        Py_DECREF(module);
+        return nullptr;
+    }
+    if (wrapper_mode == WrapperMode::kMissingRunTransformQuery &&
+        PyObject_DelAttrString(module, "run_transform_query") != 0) {
+        Py_DECREF(module);
+        return nullptr;
+    }
+    if (wrapper_mode == WrapperMode::kNonCallableRunTransformQuery &&
+        !SetModuleAttribute(
+            module, "run_transform_query", PyLong_FromLong(1))) {
+        Py_DECREF(module);
+        return nullptr;
+    }
     return module;
 }
 
@@ -296,6 +431,20 @@ class TemporaryWheel {
  private:
     std::filesystem::path path_;
 };
+
+std::string
+SerializeRunParams(const std::string& resource_name = "rank_udf",
+                   const std::string& stage = "L2_rerank") {
+    milvus::proto::cgo::PyUDFRunParams params;
+    params.set_resource_name(resource_name);
+    params.set_stage(stage);
+    params.mutable_udf_params();
+    std::string serialized;
+    if (!params.SerializeToString(&serialized)) {
+        throw std::runtime_error("could not serialize PyUDF run params");
+    }
+    return serialized;
+}
 
 std::string
 SerializeRequest(const std::string& local_path,
@@ -427,6 +576,42 @@ TestWrapperNonCallableCloser() {
 }
 
 bool
+TestWrapperMissingFreezeParams() {
+    ResetBehaviors();
+    CHECK(RegisterWrapper(WrapperMode::kMissingFreezeParams));
+    return ExpectFailure(
+        InitializePyUDFRuntime(),
+        "trusted runtime wrapper has no callable freeze_params");
+}
+
+bool
+TestWrapperNonCallableFreezeParams() {
+    ResetBehaviors();
+    CHECK(RegisterWrapper(WrapperMode::kNonCallableFreezeParams));
+    return ExpectFailure(
+        InitializePyUDFRuntime(),
+        "trusted runtime wrapper has no callable freeze_params");
+}
+
+bool
+TestWrapperMissingRunTransformQuery() {
+    ResetBehaviors();
+    CHECK(RegisterWrapper(WrapperMode::kMissingRunTransformQuery));
+    return ExpectFailure(
+        InitializePyUDFRuntime(),
+        "trusted runtime wrapper has no callable run_transform_query");
+}
+
+bool
+TestWrapperNonCallableRunTransformQuery() {
+    ResetBehaviors();
+    CHECK(RegisterWrapper(WrapperMode::kNonCallableRunTransformQuery));
+    return ExpectFailure(
+        InitializePyUDFRuntime(),
+        "trusted runtime wrapper has no callable run_transform_query");
+}
+
+bool
 TestRequestValidation() {
     CHECK(InitializeWorkingRuntime());
     TemporaryWheel wheel;
@@ -519,7 +704,8 @@ TestPythonLoadExceptionPropagates() {
         LoadPyUDFResource(reinterpret_cast<const uint8_t*>(request.data()),
                           request.size(),
                           &resource),
-        "Python UDF load failed"));
+        "Python UDF load failed",
+        PyUDFErrorCodeFunctionFailed));
     CHECK(resource == nullptr);
     CHECK(load_calls == 1);
     return true;
@@ -569,6 +755,83 @@ LoadCppResource(const std::string& serialized_request) {
 }
 
 bool
+TestResourceRunIdentityAndClosedState() {
+    CHECK(InitializeWorkingRuntime());
+    TemporaryWheel wheel;
+    auto resource = LoadCppResource(SerializeRequest(wheel.path()));
+    CHECK(resource != nullptr);
+
+    int64_t chunk_sizes[] = {2};
+    auto invocation =
+        std::make_unique<milvus::pyudf::PyUDFInvocation>(1, 1, chunk_sizes);
+    {
+        PyGILState_STATE gil = PyGILState_Ensure();
+        auto check_python = [gil](PyObject* object) {
+            if (object != nullptr) {
+                return true;
+            }
+            if (PyErr_Occurred()) {
+                PyErr_Print();
+            }
+            PyGILState_Release(gil);
+            return false;
+        };
+        auto* pyarrow = PyImport_ImportModule("pyarrow");
+        CHECK(check_python(pyarrow));
+        auto* array_factory = PyObject_GetAttrString(pyarrow, "array");
+        CHECK(check_python(array_factory));
+        auto* values = Py_BuildValue("[ii]", 10, 20);
+        CHECK(check_python(values));
+        auto* python_array = PyObject_CallOneArg(array_factory, values);
+        CHECK(check_python(python_array));
+        auto* array_address = PyLong_FromVoidPtr(invocation->input_array(0, 0));
+        auto* schema_address =
+            PyLong_FromVoidPtr(invocation->input_schema(0, 0));
+        CHECK(check_python(array_address));
+        CHECK(check_python(schema_address));
+        auto* exported = PyObject_CallMethod(
+            python_array, "_export_to_c", "OO", array_address, schema_address);
+        CHECK(check_python(exported));
+        Py_DECREF(exported);
+        Py_DECREF(schema_address);
+        Py_DECREF(array_address);
+        Py_DECREF(python_array);
+        Py_DECREF(values);
+        Py_DECREF(array_factory);
+        Py_DECREF(pyarrow);
+        PyGILState_Release(gil);
+    }
+
+    const auto params = SerializeRunParams();
+    auto result = resource->Run(*invocation,
+                                reinterpret_cast<const uint8_t*>(params.data()),
+                                params.size());
+    CHECK(result != nullptr);
+    CHECK(result->num_outputs() == 1);
+    CHECK(result->num_chunks(0) == 1);
+    CHECK(invocation->input_array(0, 0)->release == nullptr);
+    CHECK(invocation->input_schema(0, 0)->release == nullptr);
+    CHECK(result->output_array(0, 0)->release != nullptr);
+    CHECK(result->output_schema(0, 0)->release != nullptr);
+    CHECK(result->output_array(0, 0)->length == 2);
+
+    resource->Close();
+    CHECK(close_calls == 1);
+    try {
+        auto closed_result =
+            resource->Run(*invocation,
+                          reinterpret_cast<const uint8_t*>(params.data()),
+                          params.size());
+        static_cast<void>(closed_result);
+        return Fail("closed resource Run unexpectedly succeeded");
+    } catch (const std::exception& error) {
+        CHECK(std::string(error.what()).find("resource is closed") !=
+              std::string::npos);
+    }
+    return true;
+}
+
+bool
 TestCloseExceptionPropagatesAndReleases() {
     CHECK(InitializeWorkingRuntime());
     TemporaryWheel wheel;
@@ -582,7 +845,8 @@ TestCloseExceptionPropagatesAndReleases() {
                           &resource)));
     CHECK(resource != nullptr);
     CHECK(ExpectFailure(DeletePyUDFResource(resource),
-                        "Python resource close failed"));
+                        "Python resource close failed",
+                        PyUDFErrorCodeFunctionFailed));
     CHECK(close_calls == 1);
     return true;
 }
@@ -638,10 +902,19 @@ constexpr TestCase test_cases[] = {
      TestWrapperIncompatibleApiVersion},
     {"trusted-wrapper-non-callable-loader", TestWrapperNonCallableLoader},
     {"trusted-wrapper-non-callable-closer", TestWrapperNonCallableCloser},
+    {"trusted-wrapper-missing-freeze-params", TestWrapperMissingFreezeParams},
+    {"trusted-wrapper-non-callable-freeze-params",
+     TestWrapperNonCallableFreezeParams},
+    {"trusted-wrapper-missing-run-transform-query",
+     TestWrapperMissingRunTransformQuery},
+    {"trusted-wrapper-non-callable-run-transform-query",
+     TestWrapperNonCallableRunTransformQuery},
     {"request-validation", TestRequestValidation},
     {"python-load-exception", TestPythonLoadExceptionPropagates},
     {"invalid-python-load-result", TestInvalidPythonLoadResultIsRejected},
     {"valid-load-and-close", TestValidLoadAndClose},
+    {"resource-run-identity-and-closed-state",
+     TestResourceRunIdentityAndClosedState},
     {"close-exception", TestCloseExceptionPropagatesAndReleases},
     {"concurrent-idempotent-close", TestConcurrentIdempotentClose},
 };

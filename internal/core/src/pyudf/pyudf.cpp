@@ -136,14 +136,19 @@ PyUDFInvocation::input_schema(int32_t input_index, int32_t chunk_index) {
     return &input_schemas_[slot_index(input_index, chunk_index)];
 }
 
-std::unique_ptr<PyUDFResult>
-PyUDFInvocation::RunIdentity() {
+void
+PyUDFInvocation::ValidatePopulated() const {
     for (size_t slot = 0; slot < input_arrays_.size(); ++slot) {
         if (!IsPopulated(input_arrays_[slot], input_schemas_[slot])) {
             throw std::invalid_argument(
                 "py_udf: all invocation input slots must be populated");
         }
     }
+}
+
+std::unique_ptr<PyUDFResult>
+PyUDFInvocation::RunIdentity() {
+    ValidatePopulated();
 
     std::vector<int32_t> output_chunks(static_cast<size_t>(num_inputs_),
                                        num_chunks_);

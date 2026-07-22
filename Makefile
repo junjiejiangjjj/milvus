@@ -381,7 +381,7 @@ test-pyudf-runtime-wheel: build-pyudf-runtime-wheel
 			--no-deps \
 			--target $(PYUDF_RUNTIME_WHEEL_DIR)/site-packages \
 			"$$1"; \
-		$(PYTHON) -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import importlib.metadata, milvus_pyudf_runtime; assert milvus_pyudf_runtime.RUNTIME_API_VERSION == 1; assert callable(milvus_pyudf_runtime.load_instances); assert callable(milvus_pyudf_runtime.close_instances); print(importlib.metadata.version("milvus-pyudf-runtime"))' \
+		$(PYTHON) -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import importlib.metadata, milvus_pyudf_runtime; assert milvus_pyudf_runtime.RUNTIME_API_VERSION == 1; assert callable(milvus_pyudf_runtime.load_instances); assert callable(milvus_pyudf_runtime.close_instances); assert callable(milvus_pyudf_runtime.import_array); assert callable(milvus_pyudf_runtime.make_chunked_array); assert callable(milvus_pyudf_runtime.export_array); assert callable(milvus_pyudf_runtime.freeze_params); assert callable(milvus_pyudf_runtime.run_transform_query); print(importlib.metadata.version("milvus-pyudf-runtime"))' \
 			$(PYUDF_RUNTIME_WHEEL_DIR)/site-packages
 
 test-util:

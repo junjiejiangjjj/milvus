@@ -187,6 +187,7 @@ def create_udf(context):
 	resource, err := loadNativeRuntimeTestResource("native_factory_failure", wheelPath, 1)
 	require.Error(t, err)
 	assert.Nil(t, resource)
+	assert.ErrorIs(t, err, merr.ErrFunctionFailed)
 	assert.ErrorContains(t, err, "native factory boom")
 	assert.ErrorContains(t, err, "Python UDF load failed")
 }
@@ -213,6 +214,7 @@ def create_udf(context):
 
 	err = resource.Close()
 	require.Error(t, err)
+	assert.ErrorIs(t, err, merr.ErrFunctionFailed)
 	assert.ErrorContains(t, err, "native close boom")
 	assert.ErrorContains(t, err, "Python resource close failed")
 	assert.Nil(t, resource.handle)

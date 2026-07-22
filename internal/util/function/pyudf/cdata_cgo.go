@@ -47,10 +47,38 @@ func runPyUDFIdentity(inputs []*arrow.Chunked) ([]*arrow.Chunked, error) {
 }
 
 func runPyUDFIdentityWithImporter(inputs []*arrow.Chunked, importer pyUDFCArrayImporter) ([]*arrow.Chunked, error) {
+	return runPyUDFArrowRoundTrip(inputs, importer, func(invocation C.CPyUDFInvocation, result *C.CPyUDFResult) C.CStatus {
+		return C.RunPyUDFIdentity(invocation, result)
+	})
+}
+
+func (resource *nativeResource) run(inputs []*arrow.Chunked, serializedParams []byte) ([]*arrow.Chunked, error) {
+	return resource.runWithImporter(inputs, serializedParams, cdata.ImportCArray)
+}
+
+func (resource *nativeResource) runWithImporter(inputs []*arrow.Chunked, serializedParams []byte, importer pyUDFCArrayImporter) ([]*arrow.Chunked, error) {
+	if resource == nil || resource.handle == nil {
+		return nil, merr.WrapErrServiceInternalMsg("py_udf: native resource is closed")
+	}
+	var paramsPtr *C.uint8_t
+	if len(serializedParams) > 0 {
+		paramsPtr = (*C.uint8_t)(unsafe.Pointer(&serializedParams[0]))
+	}
+	return runPyUDFArrowRoundTrip(inputs, importer, func(invocation C.CPyUDFInvocation, result *C.CPyUDFResult) C.CStatus {
+		return C.RunPyUDFResource(resource.handle, invocation, paramsPtr, C.uint64_t(len(serializedParams)), result)
+	})
+}
+
+type pyUDFNativeRunner func(C.CPyUDFInvocation, *C.CPyUDFResult) C.CStatus
+
+func runPyUDFArrowRoundTrip(inputs []*arrow.Chunked, importer pyUDFCArrayImporter, runner pyUDFNativeRunner) ([]*arrow.Chunked, error) {
 	if importer == nil {
 		return nil, merr.WrapErrServiceInternalMsg("py_udf: Arrow C Data importer is nil")
 	}
-	chunkSizes, err := validatePyUDFIdentityInputs(inputs)
+	if runner == nil {
+		return nil, merr.WrapErrServiceInternalMsg("py_udf: native runner is nil")
+	}
+	chunkSizes, err := validatePyUDFInputs(inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +109,7 @@ func runPyUDFIdentityWithImporter(inputs []*arrow.Chunked, importer pyUDFCArrayI
 	}
 
 	var resultHandle C.CPyUDFResult
-	status := C.RunPyUDFIdentity(invocation.handle, &resultHandle)
+	status := runner(invocation.handle, &resultHandle)
 	if err := consumePyUDFCStatus(&status); err != nil {
 		if resultHandle != nil {
 			C.DeletePyUDFResult(resultHandle)
@@ -89,15 +117,15 @@ func runPyUDFIdentityWithImporter(inputs []*arrow.Chunked, importer pyUDFCArrayI
 		return nil, err
 	}
 	if resultHandle == nil {
-		return nil, merr.WrapErrServiceInternalMsg("py_udf: native identity returned nil result")
+		return nil, merr.WrapErrServiceInternalMsg("py_udf: native runner returned nil result")
 	}
 	result := pyUDFResult{handle: resultHandle}
 	defer result.close()
 
-	return importPyUDFIdentityResult(&result, inputs, chunkSizes, importer)
+	return importPyUDFResult(&result, chunkSizes, importer)
 }
 
-func validatePyUDFIdentityInputs(inputs []*arrow.Chunked) ([]int64, error) {
+func validatePyUDFInputs(inputs []*arrow.Chunked) ([]int64, error) {
 	if len(inputs) > math.MaxInt32 {
 		return nil, merr.WrapErrServiceInternalMsg("py_udf: input count %d exceeds native limit", len(inputs))
 	}
@@ -204,10 +232,10 @@ func (result *pyUDFResult) close() {
 	result.handle = nil
 }
 
-func importPyUDFIdentityResult(result *pyUDFResult, inputs []*arrow.Chunked, chunkSizes []int64, importer pyUDFCArrayImporter) ([]*arrow.Chunked, error) {
+func importPyUDFResult(result *pyUDFResult, chunkSizes []int64, importer pyUDFCArrayImporter) ([]*arrow.Chunked, error) {
 	numOutputs := int(C.PyUDFResultNumOutputs(result.handle))
-	if numOutputs != len(inputs) {
-		return nil, merr.WrapErrServiceInternalMsg("py_udf: native identity returned %d outputs, expected %d", numOutputs, len(inputs))
+	if numOutputs < 0 {
+		return nil, merr.WrapErrServiceInternalMsg("py_udf: native result returned invalid output count %d", numOutputs)
 	}
 
 	outputs := make([]*arrow.Chunked, 0, numOutputs)
@@ -216,10 +244,17 @@ func importPyUDFIdentityResult(result *pyUDFResult, inputs []*arrow.Chunked, chu
 		if numChunks != len(chunkSizes) {
 			releasePyUDFChunked(outputs)
 			return nil, merr.WrapErrServiceInternalMsg(
-				"py_udf: native identity output %d has %d chunks, expected %d",
+				"py_udf: native output %d has %d chunks, expected %d",
 				outputIdx,
 				numChunks,
 				len(chunkSizes),
+			)
+		}
+		if numChunks == 0 {
+			releasePyUDFChunked(outputs)
+			return nil, merr.WrapErrServiceInternalMsg(
+				"py_udf: native output %d has no chunks or type metadata",
+				outputIdx,
 			)
 		}
 
@@ -252,6 +287,18 @@ func importPyUDFIdentityResult(result *pyUDFResult, inputs []*arrow.Chunked, chu
 				releasePyUDFChunked(outputs)
 				return nil, merr.WrapErrServiceInternalMsg("py_udf: importer returned nil output %d chunk %d", outputIdx, chunkIdx)
 			}
+			if !arrow.TypeEqual(field.Type, chunk.DataType()) {
+				chunk.Release()
+				releasePyUDFArrays(chunks)
+				releasePyUDFChunked(outputs)
+				return nil, merr.WrapErrServiceInternalMsg(
+					"py_udf: output %d chunk %d imported type %s but schema reports %s",
+					outputIdx,
+					chunkIdx,
+					chunk.DataType(),
+					field.Type,
+				)
+			}
 			if dataType == nil {
 				dataType = field.Type
 			} else if !arrow.TypeEqual(dataType, field.Type) {
@@ -281,9 +328,6 @@ func importPyUDFIdentityResult(result *pyUDFResult, inputs []*arrow.Chunked, chu
 			chunks = append(chunks, chunk)
 		}
 
-		if dataType == nil {
-			dataType = inputs[outputIdx].DataType()
-		}
 		output := arrow.NewChunked(dataType, chunks)
 		releasePyUDFArrays(chunks)
 		outputs = append(outputs, output)
@@ -310,5 +354,8 @@ func consumePyUDFCStatus(status *C.CStatus) error {
 	errorCode := int32(status.error_code)
 	errorMsg := C.GoString(status.error_msg)
 	C.free(unsafe.Pointer(status.error_msg))
+	if errorCode == int32(C.PyUDFErrorCodeFunctionFailed) {
+		return merr.WrapErrFunctionFailedMsg("%s", errorMsg)
+	}
 	return merr.SegcoreError(errorCode, errorMsg)
 }
