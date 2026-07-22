@@ -20,7 +20,7 @@ The initial public API focused on ordinary `SearchRequest` L2 rerank. The curren
 - Final `$score` is serialized through the existing search score/distance field.
 - Intermediate variables and internally fetched fields are not returned unless requested by normal search output projection.
 
-The native XGBoost L0 expression and its execution constraints are described in [XGBoost FunctionChain Expression Design](20260708-xgboost-function-chain.md).
+The native XGBoost L0 expression and its execution constraints are described in [XGBoost FunctionChain Expression Design](20260708-xgboost-function-chain.md). The embedded Python L2 expression and its Production Runtime boundary are described in [PyUDF FunctionChain Expression](20260722-pyudf-function-chain.md).
 
 ## Motivation
 
