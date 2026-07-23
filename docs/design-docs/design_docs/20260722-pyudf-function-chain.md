@@ -3,7 +3,7 @@
 - **Created:** 2026-07-22
 - **Author(s):** @junjie.jiang
 - **Status:** Draft
-- **Component:** Proxy / Function Chain / Embedded CPython
+- **Component:** Function Chain / Embedded CPython
 - **Related Issues:** TBD
 - **Released:** N/A
 
@@ -11,17 +11,17 @@
 
 PyUDF adds a `py_udf` FunctionChain expression for executing a Python wheel during L2 rerank. The current runtime embeds CPython in Milvus, exchanges Arrow data with PyArrow through the Arrow C Data Interface, and lazily loads synchronized FileResource wheels through a lease-based cache.
 
-The implemented Production Runtime slice provides the Go, C++, and Python runtime layers, but it is not yet composed into the Proxy lifecycle. Proxy ownership, FileResource listener registration, and runtime injection into FunctionChain construction are a separate follow-up slice.
+The expression package owns a process-global Production Runtime, following the existing XGBoost expression ownership pattern. Package initialization reads the immutable configuration, initializes embedded CPython immediately when enabled, registers the final runtime as a FileResource listener, and binds every `PyUDFExpr` to it without component-specific FunctionChain injection.
 
 ## Scope
 
 The first release is constrained to:
 
 - expression name `py_udf`;
-- `StageL2Rerank` support in the FunctionChain expression/runtime layer, targeting later Proxy composition;
+- `StageL2Rerank` support through the package-global expression runtime with no component-specific build-context injection;
 - embedded CPython only;
 - one Python wheel per FileResource;
-- wheels already synchronized to Proxy local storage;
+- wheels already synchronized to the executing process's local storage;
 - synchronous `transform_query` execution;
 - Arrow C Data exchange without Arrow IPC;
 - trusted runtime API version `1`;
@@ -30,10 +30,8 @@ The first release is constrained to:
 
 The following are not implemented in the current slice:
 
-- Proxy `Init`/`Stop` ownership;
-- FileResource listener registration and unregistration;
-- passing `ProductionRuntime` through `FunctionBuildContext.PyUDFRuntime` in the real Search path;
-- an end-to-end Proxy Search execution using a user wheel;
+- Proxy FileResource synchronization/download and the initial authoritative snapshot delivery;
+- an end-to-end Proxy Search execution using a user wheel delivered by that synchronization path;
 - full-batch `transform` execution;
 - dedicated executor or admission queue;
 - asynchronous `CFuture` execution;
@@ -367,6 +365,18 @@ When enabled, construction:
 
 When disabled, construction returns an unavailable runtime and does not initialize CPython.
 
+The expression package creates Production Runtime as a process-global object:
+
+- package initialization parses the non-refreshable configuration and constructs the final Production Runtime with a process-lifetime context, matching the XGBoost expression ownership pattern;
+- when enabled, construction validates build capability and initializes embedded CPython immediately; a configuration, capability, native initialization, or cache construction failure panics and prevents normal process startup;
+- native CPython initialization remains process-idempotent through the C++ runtime's `std::call_once`;
+- when disabled, construction installs an unavailable Runtime without checking native capability or initializing CPython;
+- package initialization registers the final Production Runtime directly as FileResource listener `pyudf`, so snapshots are delivered to the cache without manager forwarding or replay;
+- request context is used for `Acquire` and `Run`, not for global runtime/cache lifetime;
+- `PyUDFExpr` defaults to this global Runtime, so `FunctionBuildContext` remains free of PyUDF-specific dependencies and Proxy, QueryNode, or DataNode startup code does not need PyUDF-specific hooks.
+
+Individual user wheels remain lazily loaded on first acquisition. Resource update/removal closes stale resources after their final lease. Process shutdown does not explicitly close the currently active resource set or finalize CPython; the operating system reclaims process resources.
+
 ### FileResource cache
 
 The cache:
@@ -448,7 +458,7 @@ function:
 
 Current behavior:
 
-- `enabled` controls whether Production Runtime initializes embedded CPython;
+- `enabled` controls whether package initialization constructs Production Runtime with embedded CPython; enabled initialization failure panics and stops normal process startup;
 - `loadTimeout` provides a deadline checked around wheel import, factory execution, and instance initialization; the synchronous native call cannot be interrupted, so work that returns after the deadline is rejected and closed rather than being hard-stopped at the deadline;
 - `instancesPerResource` controls the number of objects created at load time, although only the first is currently executed;
 - `executorThreads` and `maxQueueSize` are validated configuration reserved for the future executor/admission slice and do not yet create scheduling capacity.
@@ -483,22 +493,20 @@ The implemented Production Runtime slice has focused coverage for:
 - real-wheel `ProductionRuntime` execution;
 - function error code `2400` and native/system error preservation;
 - enabled and disabled native build paths;
-- concurrency coverage for cache/runtime paths.
+- concurrency coverage for cache/runtime paths;
+- package-global runtime construction, panic-on-initialization-failure behavior, direct listener delivery, and request-context separation.
 
-These tests verify the util/native runtime. They do not verify Proxy lifecycle or Search E2E because that composition is not implemented yet.
+These tests verify package-global initialization and the expression/util/native runtime. They do not verify user-wheel Search E2E because Proxy FileResource synchronization is not implemented yet.
 
 ## Remaining integration work
 
 The next integration slice should:
 
-1. make Proxy own one `ProductionRuntime` instance;
-2. initialize it after required configuration and FileResource components are ready;
-3. register and unregister it as a FileResource listener;
-4. inject it through `FunctionBuildContext.PyUDFRuntime` when building L2 chains;
-5. close it after requests stop and listeners are detached;
-6. test initialization rollback and idempotent shutdown;
-7. test not-ready snapshots, resource replacement, and in-flight lease behavior through Proxy;
-8. trace `ErrFunctionFailed(2400)` and native/system errors through the complete Search response path.
+1. add Proxy FileResource synchronization/download and initial snapshot delivery;
+2. extend coordinator distribution and readiness tracking to Proxy nodes;
+3. test resource add/update/remove and in-flight lease behavior through Proxy;
+4. run a real user-wheel Search E2E that rewrites `$score`;
+5. trace `ErrFunctionFailed(2400)` and native/system errors through the complete Search response path.
 
 ## Future work
 

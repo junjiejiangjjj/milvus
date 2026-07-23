@@ -29,7 +29,6 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/util/function/models"
-	"github.com/milvus-io/milvus/internal/util/function/pyudf"
 )
 
 // =============================================================================
@@ -144,7 +143,6 @@ type FunctionArgValidator interface {
 // It is not serialized in public FunctionChain proto params.
 type FunctionBuildContext struct {
 	ModelExtraInfo *models.ModelExtraInfo
-	PyUDFRuntime   pyudf.Runtime
 }
 
 // FunctionConfig contains the public function expression configuration from FunctionChain proto.

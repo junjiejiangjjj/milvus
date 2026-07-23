@@ -225,7 +225,7 @@ func (p *functionConfig) init(base *BaseTable) {
 		Version:      "3.0.0",
 		DefaultValue: "false",
 		Export:       true,
-		Doc:          "Whether to enable the embedded PyUDF runtime on Proxy. Restart is required after changing this value.",
+		Doc:          "Whether to enable the embedded PyUDF runtime in processes that use PyUDF. Restart is required after changing this value.",
 	}
 	p.PyUDFEnabled.Init(base.mgr)
 

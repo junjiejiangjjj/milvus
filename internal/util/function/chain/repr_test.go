@@ -19,7 +19,6 @@
 package chain
 
 import (
-	"context"
 	"testing"
 
 	"github.com/apache/arrow/go/v17/arrow"
@@ -31,7 +30,6 @@ import (
 	chainexpr "github.com/milvus-io/milvus/internal/util/function/chain/expr"
 	"github.com/milvus-io/milvus/internal/util/function/chain/types"
 	"github.com/milvus-io/milvus/internal/util/function/models"
-	"github.com/milvus-io/milvus/internal/util/function/pyudf"
 )
 
 // MockFunctionExpr is a mock implementation of FunctionExpr for testing.
@@ -56,12 +54,6 @@ func (m *MockFunctionExpr) Execute(ctx *types.FuncContext, inputs []*arrow.Chunk
 }
 
 // MockBooleanFunctionExpr is a mock implementation that returns boolean type.
-type mockPyUDFRuntime struct{}
-
-func (*mockPyUDFRuntime) Acquire(context.Context, string, string) (pyudf.Lease, error) {
-	return nil, nil
-}
-
 type MockBooleanFunctionExpr struct {
 	name string
 }
@@ -487,7 +479,6 @@ func TestFunctionFromReprWithContextErrors(t *testing.T) {
 func TestFuncChainFromReprWithContextPassesBuildContext(t *testing.T) {
 	funcName := "mock_chain_context_function"
 	extraInfo := &models.ModelExtraInfo{ClusterID: "cluster-2", DBName: "db-2", BatchFactor: 11}
-	pyUDFRuntime := &mockPyUDFRuntime{}
 	params := map[string]*schemapb.FunctionParamValue{"flag": boolParam(true)}
 	args := []*schemapb.FunctionChainExprArg{columnArg("score")}
 
@@ -495,7 +486,6 @@ func TestFuncChainFromReprWithContextPassesBuildContext(t *testing.T) {
 	err := types.RegisterFunction(funcName, func(ctx types.FunctionBuildContext, cfg types.FunctionConfig) (types.FunctionExpr, error) {
 		called = true
 		assert.Same(t, extraInfo, ctx.ModelExtraInfo)
-		assert.Same(t, pyUDFRuntime, ctx.PyUDFRuntime)
 		assert.Equal(t, funcName, cfg.Name)
 		assert.Same(t, params["flag"], cfg.Params["flag"])
 		require.Len(t, cfg.Args, 1)
@@ -523,7 +513,6 @@ func TestFuncChainFromReprWithContextPassesBuildContext(t *testing.T) {
 
 	chain, err := FuncChainFromReprWithContext(repr, memory.NewGoAllocator(), types.FunctionBuildContext{
 		ModelExtraInfo: extraInfo,
-		PyUDFRuntime:   pyUDFRuntime,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, chain)

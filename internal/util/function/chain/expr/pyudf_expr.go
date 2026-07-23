@@ -50,6 +50,9 @@ func NewPyUDFExpr(resourceName string, udfParams *schemapb.FunctionParamObject, 
 	if udfParams == nil {
 		udfParams = &schemapb.FunctionParamObject{}
 	}
+	if runtime == nil {
+		runtime = globalPyUDFRuntime
+	}
 	return &PyUDFExpr{
 		BaseExpr:     *NewBaseExpr(PyUDFFuncName, []string{types.StageL2Rerank}),
 		resourceName: resourceName,
@@ -58,7 +61,7 @@ func NewPyUDFExpr(resourceName string, udfParams *schemapb.FunctionParamObject, 
 	}, nil
 }
 
-func NewPyUDFExprFromParams(ctx types.FunctionBuildContext, cfg types.FunctionConfig) (types.FunctionExpr, error) {
+func NewPyUDFExprFromParams(_ types.FunctionBuildContext, cfg types.FunctionConfig) (types.FunctionExpr, error) {
 	if err := validatePyUDFParams(cfg.Params); err != nil {
 		return nil, err
 	}
@@ -71,7 +74,7 @@ func NewPyUDFExprFromParams(ctx types.FunctionBuildContext, cfg types.FunctionCo
 	if err != nil {
 		return nil, err
 	}
-	return NewPyUDFExpr(resourceName, udfParams, ctx.PyUDFRuntime)
+	return NewPyUDFExpr(resourceName, udfParams, nil)
 }
 
 func validatePyUDFParams(params map[string]*schemapb.FunctionParamValue) error {

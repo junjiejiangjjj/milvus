@@ -33,8 +33,10 @@ type ProductionRuntime struct {
 	closeOnce sync.Once
 }
 
-// NewProductionRuntime initializes the configured PyUDF runtime. The returned
-// value also implements fileresource.Listener for later Proxy composition.
+// NewProductionRuntime initializes the process-lifetime PyUDF runtime. When
+// enabled, embedded CPython is initialized immediately; individual user wheels
+// remain lazily loaded by the cache on acquisition. The returned value also
+// implements fileresource.Listener for package-global composition.
 func NewProductionRuntime(ctx context.Context, config Config) (*ProductionRuntime, error) {
 	return newProductionRuntime(
 		ctx,

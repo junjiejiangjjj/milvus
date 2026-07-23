@@ -61,9 +61,7 @@ func TestNewPyUDFExprFromParams(t *testing.T) {
 			"factor": doubleParam(0.3),
 		}),
 	}}
-	runtime := &fakePyUDFRuntime{}
-
-	fn, err := NewPyUDFExprFromParams(types.FunctionBuildContext{PyUDFRuntime: runtime}, types.FunctionConfig{Params: map[string]*schemapb.FunctionParamValue{
+	fn, err := NewPyUDFExprFromParams(types.FunctionBuildContext{}, types.FunctionConfig{Params: map[string]*schemapb.FunctionParamValue{
 		pyUDFParamResourceName: stringParam(" rank_udf "),
 		pyUDFParamUDFParams:    objectParam(udfParams.Fields),
 	}})
@@ -73,7 +71,7 @@ func TestNewPyUDFExprFromParams(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "rank_udf", expr.resourceName)
 	assert.Equal(t, udfParams, expr.udfParams)
-	assert.Same(t, runtime, expr.runtime)
+	assert.Same(t, globalPyUDFRuntime, expr.runtime)
 	assert.True(t, expr.IsRunnable(types.StageL2Rerank))
 	assert.False(t, expr.IsRunnable(types.StageL0Rerank))
 	assert.Nil(t, expr.OutputDataTypes())
@@ -162,6 +160,7 @@ func TestPyUDFExprValidateArgs(t *testing.T) {
 	expr, err := NewPyUDFExpr("rank_udf", nil, nil)
 	require.NoError(t, err)
 
+	assert.Same(t, globalPyUDFRuntime, expr.runtime)
 	assert.Error(t, expr.ValidateArgs(nil))
 	assert.Error(t, expr.ValidateArgs([]*schemapb.FunctionChainExprArg{nil}))
 	assert.Error(t, expr.ValidateArgs([]*schemapb.FunctionChainExprArg{pyUDFLiteralArg(stringParam("value"))}))
@@ -235,13 +234,6 @@ func TestPyUDFExprExecuteErrors(t *testing.T) {
 		require.NoError(t, err)
 		_, err = expr.Execute(types.NewFuncContextFull(context.Background(), pool, types.StageL0Rerank), []*arrow.Chunked{input})
 		assert.ErrorContains(t, err, "is not supported")
-	})
-
-	t.Run("nil runtime", func(t *testing.T) {
-		expr, err := NewPyUDFExpr("rank_udf", nil, nil)
-		require.NoError(t, err)
-		_, err = expr.Execute(types.NewFuncContextFull(context.Background(), pool, types.StageL2Rerank), []*arrow.Chunked{input})
-		assert.ErrorContains(t, err, "runtime is nil")
 	})
 
 	t.Run("acquire typed error", func(t *testing.T) {
