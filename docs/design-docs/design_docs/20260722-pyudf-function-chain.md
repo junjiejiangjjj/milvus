@@ -465,6 +465,17 @@ Current behavior:
 
 Configuration is non-refreshable. Runtime selection does not silently fall back.
 
+### Embedded configuration limitation
+
+The current package-global initialization model is not compatible with enabling PyUDF from Embedded Milvus configuration:
+
+1. importing the FunctionChain expression package constructs `globalPyUDFRuntime` during Go package initialization;
+2. that construction calls `paramtable.Get()`, which initializes the global parameter table through `sync.Once`;
+3. the Embedded entry point sets `MILVUSCONF=/tmp/milvus/configs/` only later, when `startEmbedded()` is invoked;
+4. `MilvusRoles.Run()` subsequently calls `paramtable.InitWithBaseTable(...embedded-milvus.yaml)`, but the earlier `sync.Once` initialization prevents that Embedded configuration from replacing the parameter table.
+
+Consequently, the package-global runtime reads the pre-Embedded/default configuration, normally leaving PyUDF disabled even if `embedded-milvus.yaml` enables it. PyUDF is therefore not supported in Embedded Milvus under the current initialization model. Standalone and cluster processes must make their configuration environment available before process/package initialization. Supporting Embedded Milvus requires moving its configuration/environment setup ahead of Go package initialization or replacing the package-global configuration read with an explicit post-configuration bootstrap.
+
 ## Build and packaging
 
 The trusted runtime wheel can be built and verified with:
