@@ -30,6 +30,18 @@ import (
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
+func TestProductionRuntimeInvalidState(t *testing.T) {
+	var runtime *ProductionRuntime
+	_, err := runtime.Acquire(context.Background(), "rank_udf", "L2_rerank")
+	assert.ErrorIs(t, err, merr.ErrServiceInternal)
+	assert.ErrorContains(t, err, "production runtime is nil")
+
+	runtime = &ProductionRuntime{}
+	_, err = runtime.Acquire(context.Background(), "rank_udf", "L2_rerank")
+	assert.ErrorIs(t, err, merr.ErrServiceInternal)
+	assert.ErrorContains(t, err, "production runtime cache is nil")
+}
+
 func TestProductionRuntimeDisabled(t *testing.T) {
 	var capabilityCalls atomic.Int64
 	var initializeCalls atomic.Int64

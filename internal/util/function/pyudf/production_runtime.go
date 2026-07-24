@@ -27,8 +27,8 @@ import (
 
 // ProductionRuntime owns the util-layer PyUDF runtime and FileResource cache.
 type ProductionRuntime struct {
-	runtime Runtime
-	cache   *Cache
+	cache       *Cache
+	unavailable Runtime
 
 	closeOnce sync.Once
 }
@@ -59,7 +59,7 @@ func newProductionRuntime(
 	}
 	if !config.Enabled {
 		return &ProductionRuntime{
-			runtime: NewUnavailableRuntime("function.pyUDF.enabled is false"),
+			unavailable: NewUnavailableRuntime("function.pyUDF.enabled is false"),
 		}, nil
 	}
 	if capability == nil || initialize == nil || newLoader == nil {
@@ -85,17 +85,20 @@ func newProductionRuntime(
 	if err != nil {
 		return nil, err
 	}
-	return &ProductionRuntime{
-		runtime: cache,
-		cache:   cache,
-	}, nil
+	return &ProductionRuntime{cache: cache}, nil
 }
 
 func (runtime *ProductionRuntime) Acquire(ctx context.Context, resourceName, stage string) (Lease, error) {
-	if runtime == nil || runtime.runtime == nil {
+	if runtime == nil {
 		return nil, merr.WrapErrServiceInternalMsg("py_udf: production runtime is nil")
 	}
-	return runtime.runtime.Acquire(ctx, resourceName, stage)
+	if runtime.unavailable != nil {
+		return runtime.unavailable.Acquire(ctx, resourceName, stage)
+	}
+	if runtime.cache == nil {
+		return nil, merr.WrapErrServiceInternalMsg("py_udf: production runtime cache is nil")
+	}
+	return runtime.cache.Acquire(ctx, resourceName, stage)
 }
 
 func (runtime *ProductionRuntime) OnFileResourceSync(event fileresource.SyncEvent) error {
