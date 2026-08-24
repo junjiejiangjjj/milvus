@@ -1175,7 +1175,6 @@ func (op *rerankOperator) run(ctx context.Context, span trace.Span, inputs ...an
 		}
 		return nil, err
 	}
-
 	// Execute chain. Liveness pruning removes scalar inputs after their last use;
 	// system columns remain available for result export.
 	executeOpts := chain.ExecuteOptions{
@@ -3532,8 +3531,9 @@ func newBuiltInPipeline(t *searchTask) (*pipeline, error) {
 			// so there's some memory overhead.
 			return newPipeline(hybridSearchWithRequeryAndRerankByFieldDataPipe, t)
 		} else {
-			// Otherwise, we can rerank and limit the requery size to the limit.
-			// so the memory overhead is less than the hybridSearchWithRequeryAndRerankByFieldDataPipe.
+			// Otherwise, rerank first and requery only the rows emitted by the reranker.
+			// Public Function Chains own that output size; legacy paths still apply
+			// their server-built limit before requery.
 			return newPipeline(hybridSearchWithRequeryPipe, t)
 		}
 	}

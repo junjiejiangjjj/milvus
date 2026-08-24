@@ -492,13 +492,9 @@ func (t *searchTask) initAdvancedSearchRequest(ctx context.Context) error {
 
 	var err error
 	var membershipFilterPlanSize int64
-	if err := validateFunctionChainSearchRequest(t.request, true); err != nil {
+	t.rerankMeta, err = selectHybridRerankMeta(t.request, t.schema)
+	if err != nil {
 		return err
-	}
-	if t.request.FunctionScore != nil {
-		t.rerankMeta = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
-	} else {
-		t.rerankMeta = newRerankMetaFromLegacy(t.request.GetSearchParams())
 	}
 
 	allFields := typeutil.GetAllFieldSchemas(t.schema.CollectionSchema)
@@ -549,8 +545,14 @@ func (t *searchTask) initAdvancedSearchRequest(ctx context.Context) error {
 	t.hybridElementLevel = false
 	queryFieldIDs := []int64{}
 	for index, subReq := range t.request.GetSubReqs() {
+		querynodeFunctionChains := subReq.GetFunctionChains()
 		// For hybrid search, order_by_fields comes from main search params, not sub-search params
-		plan, queryInfo, offset, subIsIterator, _, searchType, err := t.tryGeneratePlan(subReq.GetSearchParams(), subReq.GetDsl(), subReq.GetExprTemplateValues())
+		plan, queryInfo, offset, subIsIterator, _, searchType, err := t.tryGeneratePlan(
+			subReq.GetSearchParams(),
+			subReq.GetDsl(),
+			subReq.GetExprTemplateValues(),
+			t.request.GetFunctionScore() != nil || len(querynodeFunctionChains) > 0,
+		)
 		if err != nil {
 			return err
 		}
@@ -684,6 +686,7 @@ func (t *searchTask) initAdvancedSearchRequest(ctx context.Context) error {
 			plan.DynamicFields = t.userDynamicFields
 		}
 		plan.Namespace = namespaceForPlan(t.schema.CollectionSchema, t.request.Namespace)
+		plan.QuerynodeFunctionChains = querynodeFunctionChains
 
 		internalSubReq.SerializedExprPlan, membershipFilterPlanSize, err = marshalPlanWithMembershipFilterSizeLimit(plan, membershipFilterPlanSize)
 		if err != nil {
@@ -875,7 +878,12 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 	_, errGroupByFields := funcutil.GetAttrByKeyFromRepeatedKV(GroupByFieldsKey, t.request.GetSearchParams())
 	t.legacyGroupByWire = errGroupByField == nil && errGroupByFields != nil && t.request.GetSearchAggregation() == nil
 
-	plan, queryInfo, offset, isIterator, orderByFields, searchType, err := t.tryGeneratePlan(t.request.GetSearchParams(), t.request.GetDsl(), t.request.GetExprTemplateValues())
+	plan, queryInfo, offset, isIterator, orderByFields, searchType, err := t.tryGeneratePlan(
+		t.request.GetSearchParams(),
+		t.request.GetDsl(),
+		t.request.GetExprTemplateValues(),
+		hasFunctionRerank(t.request),
+	)
 	if err != nil {
 		return err
 	}
@@ -1141,7 +1149,12 @@ func (t *searchTask) convertPlaceholderIfNeeded(phgBytes []byte, fieldID int64) 
 	return ConvertPlaceholderGroup(phgBytes, field)
 }
 
-func (t *searchTask) tryGeneratePlan(params []*commonpb.KeyValuePair, dsl string, exprTemplateValues map[string]*schemapb.TemplateValue) (*planpb.PlanNode, *planpb.QueryInfo, int64, bool, []OrderByField, internalpb.SearchType, error) {
+func (t *searchTask) tryGeneratePlan(
+	params []*commonpb.KeyValuePair,
+	dsl string,
+	exprTemplateValues map[string]*schemapb.TemplateValue,
+	functionRerank bool,
+) (*planpb.PlanNode, *planpb.QueryInfo, int64, bool, []OrderByField, internalpb.SearchType, error) {
 	annsFieldName, err := funcutil.GetAttrByKeyFromRepeatedKV(AnnsFieldKey, params)
 	if err != nil || len(annsFieldName) == 0 {
 		vecFields := typeutil.GetVectorFieldSchemas(t.schema.CollectionSchema)
@@ -1173,7 +1186,7 @@ func (t *searchTask) tryGeneratePlan(params []*commonpb.KeyValuePair, dsl string
 	hasFilter := dsl != "" || len(exprTemplateValues) > 0
 	searchType := internalpb.SearchType_DEFAULT
 	// if function rerank is set, keep searchType DEFAULT; optimizations will be disabled in queryhook
-	if !hasFunctionRerank(t.request) {
+	if !functionRerank {
 		searchType = searchInfo.DetermineSearchType(hasFilter)
 	}
 
