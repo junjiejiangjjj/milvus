@@ -1249,6 +1249,9 @@ func newRequeryOperator(t *searchTask, _ map[string]any) (operator, error) {
 	if t.GetIsAdvanced() && t.rerankMeta != nil {
 		outputFieldNames.Insert(t.rerankMeta.GetInputFieldNames()...)
 	}
+	if t.postProcessPlan != nil {
+		outputFieldNames.Insert(t.postProcessPlan.GetInputFieldNames()...)
+	}
 	// Union order_by field names with output fields for requery
 	// Use OutputFieldName which is the proper name for requery:
 	// - For dynamic fields: the original key (e.g., "age") so QueryNode extracts only that subfield

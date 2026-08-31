@@ -7289,6 +7289,38 @@ func (s *SearchPipelineSuite) TestNewRequeryOperatorIncludesOrderByOutputFieldNa
 	s.ElementsMatch([]string{"title", "price", "metadata", "dynamic_price"}, reqOp.outputFieldNames)
 }
 
+func (s *SearchPipelineSuite) TestNewRequeryOperatorIncludesPostProcessInputFieldNames() {
+	schema := &schemaInfo{
+		CollectionSchema: &schemapb.CollectionSchema{
+			Fields: []*schemapb.FieldSchema{
+				{FieldID: 100, Name: "id", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+				{FieldID: 101, Name: "title", DataType: schemapb.DataType_VarChar},
+				{FieldID: 102, Name: "price", DataType: schemapb.DataType_Double},
+			},
+		},
+		PkField: &schemapb.FieldSchema{FieldID: 100, Name: "id", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+	}
+	task := &searchTask{
+		ctx:            context.Background(),
+		collectionName: "test_collection",
+		SearchRequest:  &internalpb.SearchRequest{Base: &commonpb.MsgBase{MsgType: commonpb.MsgType_Search}},
+		request:        &milvuspb.SearchRequest{CollectionName: "test_collection"},
+		schema:         schema,
+		translatedOutputFields: []string{
+			"title",
+		},
+		postProcessPlan: &PostProcessPlan{
+			inputFieldNames: []string{"price", "title", "price"},
+		},
+		tr: timerecord.NewTimeRecorder("test"),
+	}
+
+	op, err := newRequeryOperator(task, nil)
+	s.NoError(err)
+	reqOp := op.(*requeryOperator)
+	s.ElementsMatch([]string{"title", "price"}, reqOp.outputFieldNames)
+}
+
 func (s *SearchPipelineSuite) TestNewRequeryOperator_WithoutHighlighter() {
 	// Test that without highlighter, only translated output fields are included
 	schema := &schemaInfo{

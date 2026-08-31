@@ -31,6 +31,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/util/function/chain/types"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // =============================================================================
@@ -41,6 +42,27 @@ type ChainTestSuite struct {
 	suite.Suite
 	pool *memory.CheckedAllocator
 }
+
+type invalidShapeOperator struct {
+	BaseOp
+}
+
+func (o *invalidShapeOperator) Name() string { return "InvalidShape" }
+
+func (o *invalidShapeOperator) Execute(ctx *types.FuncContext, _ *DataFrame) (*DataFrame, error) {
+	builder := NewDataFrameBuilder().SetChunkSizes([]int64{1})
+	valueBuilder := array.NewInt64Builder(ctx.Pool())
+	valueBuilder.AppendValues([]int64{1, 2}, nil)
+	values := valueBuilder.NewArray()
+	valueBuilder.Release()
+	if err := builder.AddColumnFromChunks("invalid", []arrow.Array{values}); err != nil {
+		builder.Release()
+		return nil, err
+	}
+	return builder.Build(), nil
+}
+
+func (o *invalidShapeOperator) String() string { return o.Name() }
 
 func (s *ChainTestSuite) SetupTest() {
 	s.pool = memory.NewCheckedAllocator(memory.NewGoAllocator())
@@ -134,6 +156,38 @@ func (s *ChainTestSuite) TestFuncChainString() {
 	fc := NewFuncChainWithAllocator(nil).SetName("test-chain")
 	str := fc.String()
 	s.Contains(str, "FuncChain: test-chain")
+}
+
+func (s *ChainTestSuite) TestExecuteRejectsInvalidInputShape() {
+	builder := NewDataFrameBuilder().SetChunkSizes([]int64{1})
+	valueBuilder := array.NewInt64Builder(s.pool)
+	valueBuilder.AppendValues([]int64{1, 2}, nil)
+	values := valueBuilder.NewArray()
+	valueBuilder.Release()
+	s.Require().NoError(builder.AddColumnFromChunks("value", []arrow.Array{values}))
+	df := builder.Build()
+	defer df.Release()
+
+	_, err := NewFuncChainWithAllocator(s.pool).
+		SetStage(types.StagePostProcess).
+		Limit(1).
+		Execute(df)
+	s.Require().Error(err)
+	s.ErrorIs(err, merr.ErrServiceInternal)
+	s.Contains(err.Error(), "function chain input[0] has invalid shape")
+}
+
+func (s *ChainTestSuite) TestExecuteRejectsInvalidOperatorOutputShape() {
+	df := s.createTestDataFrame()
+	defer df.Release()
+
+	_, err := NewFuncChainWithAllocator(s.pool).
+		SetStage(types.StagePostProcess).
+		Add(&invalidShapeOperator{}).
+		Execute(df)
+	s.Require().Error(err)
+	s.ErrorIs(err, merr.ErrServiceInternal)
+	s.Contains(err.Error(), "InvalidShape produced invalid DataFrame shape")
 }
 
 // =============================================================================

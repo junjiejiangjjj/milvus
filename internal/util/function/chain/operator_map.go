@@ -79,24 +79,53 @@ func (o *MapOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame, e
 	// 2. Call FunctionExpr to process columns
 	outputs, err := o.function.Execute(ctx, inputs)
 	if err != nil {
+		releaseMapOutputs(outputs)
 		return nil, err
 	}
 
-	// 3. Validate output count matches expected output columns
-	// This is especially important for dynamic output types where validation
-	// was skipped at creation time
+	// 3. Validate the function contract. DataFrame chunk shape is validated by
+	// the chain after this operator returns; Map only owns output count/type.
 	if len(outputs) != len(o.outputs) {
-		// Release outputs before returning error
-		for _, out := range outputs {
-			if out != nil {
-				out.Release()
-			}
-		}
-		return nil, merr.WrapErrServiceInternalMsg("map_op: function returned %d outputs, expected %d",
+		releaseMapOutputs(outputs)
+		return nil, merr.WrapErrFunctionFailedMsg("map_op: function returned %d outputs, expected %d",
 			len(outputs), len(o.outputs))
+	}
+	declaredTypes := o.function.OutputDataTypes()
+	if declaredTypes != nil && len(declaredTypes) != len(outputs) {
+		releaseMapOutputs(outputs)
+		return nil, merr.WrapErrFunctionFailedMsg(
+			"map_op: function declared %d output types but returned %d outputs",
+			len(declaredTypes), len(outputs))
+	}
+	for i, output := range outputs {
+		if output == nil {
+			releaseMapOutputs(outputs)
+			return nil, merr.WrapErrFunctionFailedMsg("map_op: function output[%d] %q is nil", i, o.outputs[i])
+		}
+	}
+	for i, expectedType := range declaredTypes {
+		output := outputs[i]
+		if expectedType == nil {
+			releaseMapOutputs(outputs)
+			return nil, merr.WrapErrFunctionFailedMsg("map_op: function declared nil type for output[%d] %q", i, o.outputs[i])
+		}
+		if !arrow.TypeEqual(expectedType, output.DataType()) {
+			releaseMapOutputs(outputs)
+			return nil, merr.WrapErrFunctionFailedMsg(
+				"map_op: function output[%d] %q type %s does not match declared type %s",
+				i, o.outputs[i], output.DataType(), expectedType)
+		}
 	}
 
 	return o.buildOutputDataFrame(input, outputs)
+}
+
+func releaseMapOutputs(outputs []*arrow.Chunked) {
+	for _, output := range outputs {
+		if output != nil {
+			output.Release()
+		}
+	}
 }
 
 func (o *MapOp) buildOutputDataFrame(input *DataFrame, outputs []*arrow.Chunked) (*DataFrame, error) {
@@ -105,6 +134,7 @@ func (o *MapOp) buildOutputDataFrame(input *DataFrame, outputs []*arrow.Chunked)
 	defer builder.Release()
 
 	builder.SetChunkSizes(input.chunkSizes)
+	builder.CopyAllMetadata(input)
 
 	// Build set of output column names (these will replace any existing columns with the same name)
 	outputColSet := make(map[string]struct{})
@@ -119,11 +149,7 @@ func (o *MapOp) buildOutputDataFrame(input *DataFrame, outputs []*arrow.Chunked)
 		}
 		if err := builder.AddColumnFrom(input, colName); err != nil {
 			// Release outputs since they haven't been added to builder yet
-			for _, out := range outputs {
-				if out != nil {
-					out.Release()
-				}
-			}
+			releaseMapOutputs(outputs)
 			return nil, err
 		}
 	}

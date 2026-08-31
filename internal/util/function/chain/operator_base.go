@@ -20,9 +20,11 @@ package chain
 
 import (
 	"cmp"
+	"context"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
+	"github.com/apache/arrow/go/v17/arrow/compute"
 	"github.com/apache/arrow/go/v17/arrow/memory"
 
 	"github.com/milvus-io/milvus/pkg/v3/util/merr"
@@ -39,31 +41,6 @@ type typedArray[T any] interface {
 	Value(int) T
 }
 
-// typedBuilder is an Arrow builder that supports typed append.
-type typedBuilder[T any] interface {
-	Append(T)
-	AppendNull()
-	NewArray() arrow.Array
-	Release()
-}
-
-// pickByIndices creates a new array by picking elements at the given indices.
-func pickByIndices[T any, A typedArray[T], B typedBuilder[T]](arr A, builder B, indices []int) (arrow.Array, error) {
-	defer builder.Release()
-	arrLen := arr.Len()
-	for _, idx := range indices {
-		if idx < 0 || idx >= arrLen {
-			return nil, merr.WrapErrServiceInternalMsg("index out of bounds: %d (array length: %d)", idx, arrLen)
-		}
-		if arr.IsNull(idx) {
-			builder.AppendNull()
-		} else {
-			builder.Append(arr.Value(idx))
-		}
-	}
-	return builder.NewArray(), nil
-}
-
 // compareTyped compares two values in a typed array using cmp.Ordered.
 func compareTyped[T cmp.Ordered, A typedArray[T]](arr A, i, j int) int {
 	return cmp.Compare(arr.Value(i), arr.Value(j))
@@ -73,36 +50,34 @@ func compareTyped[T cmp.Ordered, A typedArray[T]](arr A, i, j int) int {
 // Type Dispatch Functions
 // =============================================================================
 
-// dispatchPickByIndices dispatches pickByIndices to the correct Arrow type.
+// dispatchPickByIndices selects arbitrary rows while preserving the input
+// Arrow type, including nested List and Struct arrays.
 func dispatchPickByIndices(pool memory.Allocator, data arrow.Array, indices []int) (arrow.Array, error) {
-	switch arr := data.(type) {
-	case *array.Boolean:
-		return pickByIndices(arr, array.NewBooleanBuilder(pool), indices)
-	case *array.Int8:
-		return pickByIndices(arr, array.NewInt8Builder(pool), indices)
-	case *array.Int16:
-		return pickByIndices(arr, array.NewInt16Builder(pool), indices)
-	case *array.Int32:
-		return pickByIndices(arr, array.NewInt32Builder(pool), indices)
-	case *array.Int64:
-		return pickByIndices(arr, array.NewInt64Builder(pool), indices)
-	case *array.Uint8:
-		return pickByIndices(arr, array.NewUint8Builder(pool), indices)
-	case *array.Uint16:
-		return pickByIndices(arr, array.NewUint16Builder(pool), indices)
-	case *array.Uint32:
-		return pickByIndices(arr, array.NewUint32Builder(pool), indices)
-	case *array.Uint64:
-		return pickByIndices(arr, array.NewUint64Builder(pool), indices)
-	case *array.Float32:
-		return pickByIndices(arr, array.NewFloat32Builder(pool), indices)
-	case *array.Float64:
-		return pickByIndices(arr, array.NewFloat64Builder(pool), indices)
-	case *array.String:
-		return pickByIndices(arr, array.NewStringBuilder(pool), indices)
-	default:
-		return nil, merr.WrapErrServiceInternalMsg("unsupported array type %T", data)
+	if data == nil {
+		return nil, merr.WrapErrServiceInternalMsg("cannot pick rows from nil array")
 	}
+	for _, idx := range indices {
+		if idx < 0 || idx >= data.Len() {
+			return nil, merr.WrapErrServiceInternalMsg(
+				"index out of bounds: %d (array length: %d)", idx, data.Len())
+		}
+	}
+
+	indexBuilder := array.NewInt64Builder(pool)
+	defer indexBuilder.Release()
+	for _, idx := range indices {
+		indexBuilder.Append(int64(idx))
+	}
+	indexArray := indexBuilder.NewArray()
+	defer indexArray.Release()
+
+	computeCtx := compute.WithAllocator(context.Background(), pool)
+	result, err := compute.TakeArrayOpts(computeCtx, data, indexArray, compute.TakeOptions{BoundsCheck: false})
+	if err != nil {
+		return nil, merr.WrapErrServiceInternalErr(
+			err, "failed to take rows from Arrow array of type %s", data.DataType())
+	}
+	return result, nil
 }
 
 // =============================================================================

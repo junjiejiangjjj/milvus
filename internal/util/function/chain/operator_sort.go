@@ -21,6 +21,7 @@ package chain
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
@@ -37,131 +38,141 @@ func init() {
 	)
 }
 
-// SortOp sorts the DataFrame by a column.
-// Note: Uses BaseOp.inputs[0] as the sort column name.
-// Each chunk is sorted independently (per-query sorting for search results).
-// When tieBreakCol is set, ties on the primary sort column are broken by that
-// column in ascending order (e.g., sort by $score DESC, then $id ASC).
+const (
+	sortParamDesc       = "desc"
+	sortParamOrders     = "orders"
+	sortParamNullOrders = "null_orders"
+	sortParamStable     = "stable"
+	sortOrderAsc        = "asc"
+	sortOrderDesc       = "desc"
+	sortNullsFirst      = "nulls_first"
+	sortNullsLast       = "nulls_last"
+)
+
+// SortKey describes one ordered SortOp input.
+type SortKey struct {
+	Column     string
+	Descending bool
+	NullsFirst bool
+}
+
+// SortOp sorts every DataFrame chunk independently using an ordered key list.
+// All DataFrame columns are reordered with the same indices.
 type SortOp struct {
 	BaseOp
-	desc        bool
-	tieBreakCol string // optional: column name for tie-breaking (ascending)
+	keys   []SortKey
+	stable bool
 }
 
 func newSortOp(column string, desc bool, tieBreakCol string) *SortOp {
-	inputs := []string{column}
+	// Preserve the legacy fluent/Repr format: the primary key follows desc,
+	// NULLs are always last, and the optional tie-break key is ascending.
+	keys := []SortKey{{Column: column, Descending: desc, NullsFirst: false}}
 	if tieBreakCol != "" && tieBreakCol != column {
-		inputs = append(inputs, tieBreakCol)
+		keys = append(keys, SortKey{Column: tieBreakCol, NullsFirst: false})
+	}
+	return newSortOpWithKeys(keys, true)
+}
+
+func newSortOpWithKeys(keys []SortKey, stable bool) *SortOp {
+	inputs := make([]string, len(keys))
+	for i, key := range keys {
+		inputs[i] = key.Column
 	}
 	return &SortOp{
 		BaseOp: BaseOp{
 			inputs:  inputs,
 			outputs: []string{}, // Sort doesn't produce new columns
 		},
-		desc:        desc,
-		tieBreakCol: tieBreakCol,
+		keys:   append([]SortKey(nil), keys...),
+		stable: stable,
 	}
+}
+
+// NewSortOp creates a SortOp using explicit ordered keys.
+func NewSortOp(keys []SortKey, stable bool) (*SortOp, error) {
+	if len(keys) == 0 {
+		return nil, merr.WrapErrParameterMissingMsg("sort_op: at least one sort key is required")
+	}
+	for i, key := range keys {
+		if strings.TrimSpace(key.Column) == "" {
+			return nil, merr.WrapErrParameterInvalidMsg("sort_op: sort key[%d] column is empty", i)
+		}
+	}
+	return newSortOpWithKeys(keys, stable), nil
 }
 
 // Column returns the sort column name.
 func (o *SortOp) Column() string {
-	if len(o.inputs) > 0 {
-		return o.inputs[0]
+	if len(o.keys) > 0 {
+		return o.keys[0].Column
 	}
 	return ""
 }
+
+// Keys returns a copy of the ordered sort keys.
+func (o *SortOp) Keys() []SortKey {
+	return append([]SortKey(nil), o.keys...)
+}
+
+// Stable reports whether equal rows preserve their upstream order.
+func (o *SortOp) Stable() bool { return o.stable }
 
 func (o *SortOp) Name() string { return "Sort" }
 
 // Inputs and Outputs are inherited from BaseOp
 
 func (o *SortOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame, error) {
-	column := o.Column()
-	sortCol := input.Column(column)
-	if sortCol == nil {
-		return nil, merr.WrapErrServiceInternalMsg("sort_op: column %q not found", column)
+	if input == nil {
+		return nil, merr.WrapErrServiceInternalMsg("sort_op: input DataFrame is nil")
+	}
+	if len(o.keys) == 0 {
+		return nil, merr.WrapErrServiceInternalMsg("sort_op: no sort keys configured")
 	}
 
-	// Validate sort column type is comparable
-	if !isComparableType(sortCol.DataType()) {
-		return nil, merr.WrapErrServiceInternalMsg("sort_op: column %s has non-comparable type %s", column, sortCol.DataType().Name())
-	}
-
-	// Resolve optional tie-break column
-	var tieBreakCol *arrow.Chunked
-	if o.tieBreakCol != "" {
-		tieBreakCol = input.Column(o.tieBreakCol)
-		if tieBreakCol != nil && !isComparableType(tieBreakCol.DataType()) {
-			tieBreakCol = nil // ignore non-comparable tie-break column
+	keyColumns := make([]*arrow.Chunked, len(o.keys))
+	for i, key := range o.keys {
+		col := input.Column(key.Column)
+		if col == nil {
+			return nil, merr.WrapErrServiceInternalMsg("sort_op: key[%d] column %q not found", i, key.Column)
 		}
+		if !isComparableType(col.DataType()) {
+			return nil, merr.WrapErrServiceInternalMsg(
+				"sort_op: key[%d] column %q has non-comparable type %s", i, key.Column, col.DataType().Name())
+		}
+		keyColumns[i] = col
 	}
 
 	colNames := input.ColumnNames()
 	collector := NewChunkCollector(colNames, input.NumChunks())
 	defer collector.Release()
 
-	newChunkSizes := make([]int64, input.NumChunks())
+	newChunkSizes := input.ChunkSizes()
 
 	// Process each chunk independently
 	for chunkIdx := range input.NumChunks() {
-		sortChunk := sortCol.Chunk(chunkIdx)
-		chunkLen := sortChunk.Len()
-
-		// Resolve tie-break chunk for this chunk index
-		var tbChunk arrow.Array
-		if tieBreakCol != nil {
-			tbChunk = tieBreakCol.Chunk(chunkIdx)
+		keyChunks := make([]arrow.Array, len(keyColumns))
+		for i, col := range keyColumns {
+			keyChunks[i] = col.Chunk(chunkIdx)
 		}
+		chunkLen := int(newChunkSizes[chunkIdx])
 
 		// Build sort indices
 		indices := make([]int, chunkLen)
-		for i := range chunkLen {
+		for i := 0; i < chunkLen; i++ {
 			indices[i] = i
 		}
 
-		// Sort indices based on values, with tie-breaking by ID ascending.
-		// Nulls always sort to the end regardless of sort direction.
-		less, useTypedLess := makeArrayRowLess(sortChunk, tbChunk, o.desc)
-		if useTypedLess {
+		less := makeSortRowLess(keyChunks, o.keys)
+		if o.stable {
 			sort.SliceStable(indices, func(i, j int) bool {
 				return less(indices[i], indices[j])
 			})
 		} else {
-			sort.SliceStable(indices, func(i, j int) bool {
-				vi := indices[i]
-				vj := indices[j]
-
-				iNull := sortChunk.IsNull(vi)
-				jNull := sortChunk.IsNull(vj)
-				if iNull && jNull {
-					// Both null — use tie-break if available
-					if tbChunk != nil {
-						return compareArrayValues(tbChunk, vi, vj) < 0
-					}
-					return false
-				}
-				if iNull {
-					return false // null always goes after non-null
-				}
-				if jNull {
-					return true // non-null always goes before null
-				}
-
-				cmp := compareArrayValues(sortChunk, vi, vj)
-				if cmp != 0 {
-					if o.desc {
-						return cmp > 0
-					}
-					return cmp < 0
-				}
-				// Tie-break: sort by tie-break column ascending
-				if tbChunk != nil {
-					return compareArrayValues(tbChunk, vi, vj) < 0
-				}
-				return false
+			sort.Slice(indices, func(i, j int) bool {
+				return less(indices[i], indices[j])
 			})
 		}
-		newChunkSizes[chunkIdx] = int64(chunkLen)
 
 		// Reorder each column
 		for _, colName := range colNames {
@@ -180,6 +191,7 @@ func (o *SortOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame, 
 	defer builder.Release()
 
 	builder.SetChunkSizes(newChunkSizes)
+	builder.CopyAllMetadata(input)
 
 	for _, colName := range colNames {
 		if err := builder.AddColumnFromChunks(colName, collector.Consume(colName)); err != nil {
@@ -193,35 +205,59 @@ func (o *SortOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame, 
 
 type rowLessFunc func(i, j int) bool
 
-func makeArrayRowLess(sortArr arrow.Array, tieArr arrow.Array, desc bool) (rowLessFunc, bool) {
-	if !desc {
-		return nil, false
-	}
-	if scoreArr, ok := sortArr.(*array.Float32); ok && scoreArr.NullN() == 0 {
-		if idArr, ok := tieArr.(*array.Int64); ok && idArr.NullN() == 0 {
-			return func(i, j int) bool {
-				si := scoreArr.Value(i)
-				sj := scoreArr.Value(j)
-				if si != sj {
-					return si > sj
+func makeSortRowLess(keyChunks []arrow.Array, keys []SortKey) rowLessFunc {
+	// Keep the hot rerank path specialized: Float32 score DESC followed by
+	// Int64 id ASC. With no NULLs, the configured NULL ordering is irrelevant.
+	if len(keys) == 2 && keys[0].Descending && !keys[1].Descending {
+		if scoreArr, ok := keyChunks[0].(*array.Float32); ok && scoreArr.NullN() == 0 {
+			if idArr, ok := keyChunks[1].(*array.Int64); ok && idArr.NullN() == 0 {
+				return func(i, j int) bool {
+					si := scoreArr.Value(i)
+					sj := scoreArr.Value(j)
+					if si != sj {
+						return si > sj
+					}
+					return idArr.Value(i) < idArr.Value(j)
 				}
-				return idArr.Value(i) < idArr.Value(j)
-			}, true
+			}
 		}
 	}
-	return nil, false
+
+	return func(i, j int) bool {
+		for keyIdx, key := range keys {
+			arr := keyChunks[keyIdx]
+			iNull := arr.IsNull(i)
+			jNull := arr.IsNull(j)
+			switch {
+			case iNull && jNull:
+				continue
+			case iNull:
+				return key.NullsFirst
+			case jNull:
+				return !key.NullsFirst
+			}
+
+			cmp := compareArrayValues(arr, i, j)
+			if cmp == 0 {
+				continue
+			}
+			if key.Descending {
+				return cmp > 0
+			}
+			return cmp < 0
+		}
+		return false
+	}
 }
 
 // isComparableType checks if an Arrow data type is comparable for sorting.
 func isComparableType(dt arrow.DataType) bool {
 	switch dt.ID() {
-	// Note: LARGE_STRING is declared here for completeness but compareArrayValues
-	// does not handle *array.LargeString yet. In practice Milvus VARCHAR fields
-	// map to arrow.STRING, so LARGE_STRING columns are not expected.
-	case arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
+	case arrow.BOOL,
+		arrow.INT8, arrow.INT16, arrow.INT32, arrow.INT64,
 		arrow.UINT8, arrow.UINT16, arrow.UINT32, arrow.UINT64,
 		arrow.FLOAT32, arrow.FLOAT64,
-		arrow.STRING, arrow.LARGE_STRING:
+		arrow.STRING:
 		return true
 	default:
 		return false
@@ -229,14 +265,15 @@ func isComparableType(dt arrow.DataType) bool {
 }
 
 func (o *SortOp) String() string {
-	order := "ASC"
-	if o.desc {
-		order = "DESC"
+	parts := make([]string, len(o.keys))
+	for i, key := range o.keys {
+		order := "ASC"
+		if key.Descending {
+			order = "DESC"
+		}
+		parts[i] = fmt.Sprintf("%s %s", key.Column, order)
 	}
-	if o.tieBreakCol != "" {
-		return fmt.Sprintf("Sort(%s %s, %s ASC)", o.Column(), order, o.tieBreakCol)
-	}
-	return fmt.Sprintf("Sort(%s %s)", o.Column(), order)
+	return fmt.Sprintf("Sort(%s)", strings.Join(parts, ", "))
 }
 
 // compareArrayValues compares two values in an array.
@@ -253,6 +290,17 @@ func compareArrayValues(arr arrow.Array, i, j int) int {
 	}
 
 	switch a := arr.(type) {
+	case *array.Boolean:
+		iv := a.Value(i)
+		jv := a.Value(j)
+		switch {
+		case iv == jv:
+			return 0
+		case !iv:
+			return -1
+		default:
+			return 1
+		}
 	case *array.Int8:
 		return compareTyped(a, i, j)
 	case *array.Int16:
@@ -287,23 +335,104 @@ func reorderArray(pool memory.Allocator, data arrow.Array, indices []int) (arrow
 
 // NewSortOpFromRepr creates a SortOp from an OperatorRepr.
 func NewSortOpFromRepr(repr *OperatorRepr) (Operator, error) {
+	if repr == nil {
+		return nil, merr.WrapErrParameterInvalidMsg("sort_op: representation is nil")
+	}
 	if len(repr.Inputs) == 0 {
 		return nil, merr.WrapErrParameterMissingMsg("sort_op: column is required")
 	}
-	if len(repr.Inputs) > 2 {
-		return nil, merr.WrapErrParameterInvalidMsg("sort_op: expects at most 2 input columns, got %d", len(repr.Inputs))
-	}
 
+	if _, hasOrders := repr.Params[sortParamOrders]; hasOrders {
+		return newMultiKeySortOpFromRepr(repr)
+	}
+	return newLegacySortOpFromRepr(repr)
+}
+
+func newMultiKeySortOpFromRepr(repr *OperatorRepr) (Operator, error) {
 	reader := types.NewParamReader("sort_op", repr.Params)
-	desc, err := reader.Bool("desc", false, false)
+	stable, err := reader.Bool(sortParamStable, false, true)
 	if err != nil {
 		return nil, err
 	}
 
+	if _, hasDesc := repr.Params[sortParamDesc]; hasDesc {
+		return nil, merr.WrapErrParameterInvalidMsg(
+			"sort_op: parameters %q and %q cannot be used together", sortParamOrders, sortParamDesc)
+	}
+	orders, err := reader.StringSlice(sortParamOrders, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(orders) != len(repr.Inputs) {
+		return nil, merr.WrapErrParameterInvalidMsg(
+			"sort_op: orders count (%d) must match inputs count (%d)", len(orders), len(repr.Inputs))
+	}
+
+	var nullOrders []string
+	if _, hasNullOrders := repr.Params[sortParamNullOrders]; hasNullOrders {
+		nullOrders, err = reader.StringSlice(sortParamNullOrders, true)
+		if err != nil {
+			return nil, err
+		}
+		if len(nullOrders) != len(repr.Inputs) {
+			return nil, merr.WrapErrParameterInvalidMsg(
+				"sort_op: null_orders count (%d) must match inputs count (%d)", len(nullOrders), len(repr.Inputs))
+		}
+	}
+
+	keys := make([]SortKey, len(repr.Inputs))
+	for i, column := range repr.Inputs {
+		order := strings.ToLower(strings.TrimSpace(orders[i]))
+		switch order {
+		case sortOrderAsc, sortOrderDesc:
+		default:
+			return nil, merr.WrapErrParameterInvalidMsg(
+				"sort_op: orders[%d] must be %q or %q", i, sortOrderAsc, sortOrderDesc)
+		}
+		descending := order == sortOrderDesc
+		nullsFirst := descending // ASC defaults LAST; DESC defaults FIRST.
+		if nullOrders != nil {
+			nullOrder := strings.ToLower(strings.TrimSpace(nullOrders[i]))
+			switch nullOrder {
+			case sortNullsFirst:
+				nullsFirst = true
+			case sortNullsLast:
+				nullsFirst = false
+			default:
+				return nil, merr.WrapErrParameterInvalidMsg(
+					"sort_op: null_orders[%d] must be %q or %q", i, sortNullsFirst, sortNullsLast)
+			}
+		}
+		keys[i] = SortKey{Column: column, Descending: descending, NullsFirst: nullsFirst}
+	}
+	return NewSortOp(keys, stable)
+}
+
+func newLegacySortOpFromRepr(repr *OperatorRepr) (Operator, error) {
+	reader := types.NewParamReader("sort_op", repr.Params)
+	stable, err := reader.Bool(sortParamStable, false, true)
+	if err != nil {
+		return nil, err
+	}
+	if _, hasNullOrders := repr.Params[sortParamNullOrders]; hasNullOrders {
+		return nil, merr.WrapErrParameterInvalidMsg(
+			"sort_op: parameter %q requires %q", sortParamNullOrders, sortParamOrders)
+	}
+	if len(repr.Inputs) > 2 {
+		return nil, merr.WrapErrParameterInvalidMsg(
+			"sort_op: legacy format expects at most 2 input columns, got %d", len(repr.Inputs))
+	}
+
+	desc, err := reader.Bool(sortParamDesc, false, false)
+	if err != nil {
+		return nil, err
+	}
 	column := repr.Inputs[0]
 	tieBreakCol := types.IDFieldName
 	if len(repr.Inputs) > 1 {
 		tieBreakCol = repr.Inputs[1]
 	}
-	return newSortOp(column, desc, tieBreakCol), nil
+	op := newSortOp(column, desc, tieBreakCol)
+	op.stable = stable
+	return op, nil
 }

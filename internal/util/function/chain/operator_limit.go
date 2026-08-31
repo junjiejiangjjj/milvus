@@ -87,6 +87,7 @@ func (o *LimitOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame,
 	defer builder.Release()
 
 	builder.SetChunkSizes(newChunkSizes)
+	builder.CopyAllMetadata(input)
 
 	for _, colName := range colNames {
 		if err := builder.AddColumnFromChunks(colName, collector.Consume(colName)); err != nil {

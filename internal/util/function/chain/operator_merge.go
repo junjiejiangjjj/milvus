@@ -433,6 +433,9 @@ func (op *MergeOp) validateInputs(ctx *types.FuncContext, inputs []*DataFrame) (
 		if df == nil {
 			return nil, merr.WrapErrFunctionFailedMsg("merge_op: input[%d] is nil", i)
 		}
+		if err := df.ValidateShape(); err != nil {
+			return nil, merr.Wrapf(err, "merge_op: input[%d] has invalid shape", i)
+		}
 		if df.NumChunks() != numChunks {
 			return nil, merr.WrapErrFunctionFailedMsg("merge_op: input[%d] has %d chunks, expected %d", i, df.NumChunks(), numChunks)
 		}
@@ -468,11 +471,6 @@ func (op *MergeOp) validateInputs(ctx *types.FuncContext, inputs []*DataFrame) (
 		if idCol == nil {
 			return nil, merr.WrapErrFunctionFailedMsg("merge_op: input[%d] missing %s column", inputIdx, types.IDFieldName)
 		}
-		if len(idCol.Chunks()) != numChunks {
-			return nil, merr.WrapErrFunctionFailedMsg(
-				"merge_op: input[%d] column %s has %d chunks, expected %d",
-				inputIdx, types.IDFieldName, len(idCol.Chunks()), numChunks)
-		}
 		if idCol.Len() > 0 {
 			if idCol.DataType().ID() != arrow.INT64 && idCol.DataType().ID() != arrow.STRING {
 				return nil, merr.WrapErrFunctionFailedMsg(
@@ -498,11 +496,6 @@ func (op *MergeOp) validateInputs(ctx *types.FuncContext, inputs []*DataFrame) (
 				return nil, merr.WrapErrFunctionFailedMsg(
 					"merge_op: input[%d] column %s is not Float32", inputIdx, types.ScoreFieldName)
 			}
-			if len(scoreCol.Chunks()) != numChunks {
-				return nil, merr.WrapErrFunctionFailedMsg(
-					"merge_op: input[%d] column %s has %d chunks, expected %d",
-					inputIdx, types.ScoreFieldName, len(scoreCol.Chunks()), numChunks)
-			}
 		}
 
 		var elementCol *arrow.Chunked
@@ -512,20 +505,10 @@ func (op *MergeOp) validateInputs(ctx *types.FuncContext, inputs []*DataFrame) (
 				return nil, merr.WrapErrFunctionFailedMsg(
 					"merge_op: input[%d] column %s is not Int32", inputIdx, types.ElementIndicesFieldName)
 			}
-			if len(elementCol.Chunks()) != numChunks {
-				return nil, merr.WrapErrFunctionFailedMsg(
-					"merge_op: input[%d] column %s has %d chunks, expected %d",
-					inputIdx, types.ElementIndicesFieldName, len(elementCol.Chunks()), numChunks)
-			}
 		}
 
-		for chunkIdx, expectedRows := range df.chunkSizes {
+		for chunkIdx := range df.chunkSizes {
 			idChunk := idCol.Chunk(chunkIdx)
-			if idChunk.Len() != int(expectedRows) {
-				return nil, merr.WrapErrFunctionFailedMsg(
-					"merge_op: input[%d] chunk[%d] column %s has %d rows, expected %d",
-					inputIdx, chunkIdx, types.IDFieldName, idChunk.Len(), expectedRows)
-			}
 			if idChunk.DataType().ID() != arrow.INT64 && idChunk.DataType().ID() != arrow.STRING {
 				return nil, merr.WrapErrFunctionFailedMsg(
 					"merge_op: input[%d] chunk[%d] column %s has unsupported type %s",
@@ -541,11 +524,6 @@ func (op *MergeOp) validateInputs(ctx *types.FuncContext, inputs []*DataFrame) (
 
 			if scoreCol != nil {
 				scoreChunk := scoreCol.Chunk(chunkIdx)
-				if scoreChunk.Len() != idChunk.Len() {
-					return nil, merr.WrapErrFunctionFailedMsg(
-						"merge_op: input[%d] chunk[%d] column %s has %d rows, expected %d",
-						inputIdx, chunkIdx, types.ScoreFieldName, scoreChunk.Len(), idChunk.Len())
-				}
 				for rowIdx := 0; rowIdx < scoreChunk.Len(); rowIdx++ {
 					if scoreChunk.IsNull(rowIdx) {
 						return nil, merr.WrapErrFunctionFailedMsg(
@@ -557,11 +535,6 @@ func (op *MergeOp) validateInputs(ctx *types.FuncContext, inputs []*DataFrame) (
 
 			if elementCol != nil {
 				elementChunk := elementCol.Chunk(chunkIdx)
-				if elementChunk.Len() != idChunk.Len() {
-					return nil, merr.WrapErrFunctionFailedMsg(
-						"merge_op: input[%d] chunk[%d] column %s has %d rows, expected %d",
-						inputIdx, chunkIdx, types.ElementIndicesFieldName, elementChunk.Len(), idChunk.Len())
-				}
 				for rowIdx := 0; rowIdx < elementChunk.Len(); rowIdx++ {
 					if elementChunk.IsNull(rowIdx) {
 						return nil, merr.WrapErrFunctionFailedMsg(
@@ -632,6 +605,7 @@ func (op *MergeOp) mergeWithScoreCollector(ctx *types.FuncContext, inputs []*Dat
 	}
 
 	builder.SetChunkSizes(newChunkSizes)
+	copyCommonMergeMetadata(builder, inputs)
 
 	// AddColumnFromChunks takes ownership: it retains via NewChunked then releases
 	// the individual arrays. Nil out the slice so the deferred cleanup won't
@@ -670,6 +644,35 @@ func (op *MergeOp) mergeWithScoreCollector(ctx *types.FuncContext, inputs []*Dat
 
 	success = true
 	return builder.Build(), nil
+}
+
+// copyCommonMergeMetadata preserves request/runtime metadata shared by every
+// input. metric_type is intentionally excluded because MergeOp rewrites
+// $score, so an input metric no longer describes the merged score domain.
+func copyCommonMergeMetadata(builder *DataFrameBuilder, inputs []*DataFrame) {
+	if builder == nil || len(inputs) == 0 || inputs[0] == nil {
+		return
+	}
+	for key, value := range inputs[0].metadata {
+		if key == types.MetadataKeyMetricType {
+			continue
+		}
+		common := true
+		for _, input := range inputs[1:] {
+			if input == nil {
+				common = false
+				break
+			}
+			other, ok := input.metadata[key]
+			if !ok || other != value {
+				common = false
+				break
+			}
+		}
+		if common {
+			builder.SetMetadata(key, value)
+		}
+	}
 }
 
 // mergeRRF implements Reciprocal Rank Fusion.

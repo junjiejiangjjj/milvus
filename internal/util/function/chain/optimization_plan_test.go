@@ -20,6 +20,7 @@ package chain
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow/go/v17/arrow"
@@ -162,6 +163,34 @@ func TestPruneDataFrameNoDropReturnsSameDataFrame(t *testing.T) {
 	pruned, err := PruneDataFrame(df, NewColumnSet("keep", "drop"), SystemColumnPolicy{KeepAllSystemColumns: true})
 	require.NoError(t, err)
 	require.Same(t, df, pruned)
+	df.Release()
+}
+
+func TestPruneDataFrameKeepsHighlightSystemColumn(t *testing.T) {
+	pool := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer pool.AssertSize(t, 0)
+	highlights, _, err := array.FromJSON(pool, types.HighlightArrowType(), strings.NewReader(
+		`[[], [{"field_name":"text","fragments":["match"],"scores":[]}]]`,
+	))
+	require.NoError(t, err)
+	dropBuilder := array.NewInt64Builder(pool)
+	dropBuilder.AppendValues([]int64{1, 2}, nil)
+	drop := dropBuilder.NewArray()
+	dropBuilder.Release()
+
+	builder := NewDataFrameBuilder().SetChunkSizes([]int64{2})
+	require.NoError(t, builder.AddColumnFromChunks(types.HighlightFieldName, []arrow.Array{highlights}))
+	require.NoError(t, builder.AddColumnFromChunks("drop", []arrow.Array{drop}))
+	df := builder.Build()
+	pruned, err := PruneDataFrame(df, NewColumnSet(), SystemColumnPolicy{})
+	require.NoError(t, err)
+	require.NotSame(t, df, pruned)
+	require.True(t, pruned.HasColumn(types.HighlightFieldName))
+	require.True(t, types.IsHighlightArrowType(pruned.Column(types.HighlightFieldName).DataType()))
+	require.False(t, pruned.HasColumn("drop"))
+	require.Equal(t, []int64{2}, pruned.ChunkSizes())
+
+	pruned.Release()
 	df.Release()
 }
 

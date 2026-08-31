@@ -762,6 +762,14 @@ func TestSearchTask_NamespacePartitionModeSkipsRequery(t *testing.T) {
 		err := task.initAdvancedSearchRequest(ctx)
 		require.NoError(t, err)
 		require.False(t, task.needRequery)
+
+		task.request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		err = task.initAdvancedSearchRequest(ctx)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "post process is not supported for hybrid search yet")
 	})
 }
 
@@ -5545,6 +5553,7 @@ func TestSearchTask_FunctionChainRerankMeta(t *testing.T) {
 			{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
 			{FieldID: 101, Name: "ts", DataType: schemapb.DataType_Int64},
 			{FieldID: 102, Name: "vec", DataType: schemapb.DataType_FloatVector, TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}}},
+			{FieldID: 103, Name: "content", DataType: schemapb.DataType_Text},
 		},
 	}
 	schemaInfo := mustNewSchemaInfo(schema)
@@ -5654,6 +5663,152 @@ func TestSearchTask_FunctionChainRerankMeta(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, []string{"ts"}, meta.GetInputFieldNames())
 		assert.Equal(t, []int64{101}, meta.GetInputFieldIDs())
+	})
+
+	t.Run("ordinary search keeps legacy order-by out of post-process plan", func(t *testing.T) {
+		request := newRequest()
+		request.SearchParams = append(request.SearchParams, &commonpb.KeyValuePair{Key: OrderByFieldsKey, Value: "ts:asc"})
+		task := newTask(request)
+
+		require.NoError(t, task.initSearchRequest(ctx))
+		assert.Nil(t, task.postProcessPlan)
+	})
+
+	t.Run("ordinary search validates explicit post-process before runtime guard", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain execution is not supported yet")
+		require.NotNil(t, task.postProcessPlan)
+		assert.Same(t, request.FunctionChains[0], task.postProcessPlan.Chain)
+		assert.NotNil(t, task.postProcessPlan.ChainRepr)
+		assert.Empty(t, task.postProcessPlan.GetInputFieldNames())
+		assert.Empty(t, task.postProcessPlan.GetInputFieldIDs())
+	})
+
+	t.Run("ordinary search plans explicit post-process schema dependency", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("temporary", "ts")),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain execution is not supported yet")
+		require.NotNil(t, task.postProcessPlan)
+		assert.Equal(t, []string{"ts"}, task.postProcessPlan.GetInputFieldNames())
+		assert.Equal(t, []int64{101}, task.postProcessPlan.GetInputFieldIDs())
+		assert.False(t, task.needRequery)
+
+		plan := &planpb.PlanNode{}
+		require.NoError(t, proto.Unmarshal(task.GetSerializedExprPlan(), plan))
+		assert.Contains(t, plan.GetOutputFieldIds(), int64(101))
+	})
+
+	t.Run("ordinary search adds post-process scalar dependency to requery", func(t *testing.T) {
+		Params.Save(Params.CommonCfg.SearchRequeryPolicy.Key, "Always")
+		defer Params.Save(Params.CommonCfg.SearchRequeryPolicy.Key, "OutputVector")
+
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("temporary", "ts")),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain execution is not supported yet")
+		assert.True(t, task.needRequery)
+
+		plan := &planpb.PlanNode{}
+		require.NoError(t, proto.Unmarshal(task.GetSerializedExprPlan(), plan))
+		assert.NotContains(t, plan.GetOutputFieldIds(), int64(101))
+	})
+
+	t.Run("ordinary search post-process Text dependency forces requery", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(&schemapb.FunctionChainOp{Op: chaintypes.OpTypeSort, Inputs: []string{"content"}}),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain execution is not supported yet")
+		require.NotNil(t, task.postProcessPlan)
+		assert.Equal(t, []string{"content"}, task.postProcessPlan.GetInputFieldNames())
+		assert.True(t, task.needRequery)
+	})
+
+	t.Run("ordinary search rejects dynamic post-process input during planning", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("temporary", `$meta["age"]`)),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "dynamic field input")
+		assert.Nil(t, task.postProcessPlan)
+	})
+
+	t.Run("ordinary search rejects explicit post-process with order by", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		request.SearchParams = append(request.SearchParams, &commonpb.KeyValuePair{Key: OrderByFieldsKey, Value: "ts:asc"})
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain and order_by_fields")
+	})
+
+	t.Run("ordinary search rejects explicit post-process with highlighter", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		request.Highlighter = &commonpb.Highlighter{Type: commonpb.HighlightType_Lexical}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain and highlighter")
+	})
+
+	t.Run("ordinary search rejects aggregation with legacy order by", func(t *testing.T) {
+		request := newRequest()
+		request.SearchParams = append(request.SearchParams, &commonpb.KeyValuePair{Key: OrderByFieldsKey, Value: "ts:asc"})
+		task := newTask(request)
+		task.aggCtx = &search_agg.SearchAggregationContext{}
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "order_by_fields is not supported with search_aggregation")
+	})
+
+	t.Run("search iterator accepts explicit post-process sort during planning", func(t *testing.T) {
+		request := withSearchIteratorV1(newRequest())
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(&schemapb.FunctionChainOp{Op: chaintypes.OpTypeSort, Inputs: []string{chaintypes.ScoreFieldName}}),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain execution is not supported yet")
+		require.NotNil(t, task.postProcessPlan)
+		assert.Equal(t, chaintypes.OpTypeSort, task.postProcessPlan.ChainRepr.Operators[0].Type)
 	})
 
 	t.Run("ordinary search with function chains keeps default search type", func(t *testing.T) {

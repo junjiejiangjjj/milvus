@@ -19,6 +19,7 @@
 package chain
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow/go/v17/arrow"
@@ -331,6 +332,59 @@ func (s *GroupByOpTestSuite) TestGroupByOp_Basic() {
 	s.Equal("C", categories[5])
 	s.InDelta(float32(0.75), groupScores[4], 0.001)
 	s.InDelta(float32(0.75), groupScores[5], 0.001)
+}
+
+func (s *GroupByOpTestSuite) TestGroupByPreservesGlobalMetadata() {
+	df := s.createGroupByTestDataFrame()
+	defer df.Release()
+	df.metadata[types.MetadataKeyMetricType] = "COSINE"
+	df.metadata["custom"] = "value"
+
+	result, err := NewFuncChainWithAllocator(s.pool).
+		SetStage(types.StageL2Rerank).
+		GroupBy("category", 1, 3, 0).
+		Execute(df)
+	s.Require().NoError(err)
+	defer result.Release()
+	metricType, ok := result.MetricType()
+	s.True(ok)
+	s.Equal("COSINE", metricType)
+	custom, ok := result.Metadata("custom")
+	s.True(ok)
+	s.Equal("value", custom)
+}
+
+func (s *GroupByOpTestSuite) TestGroupByPreservesNestedPayloadAlignment() {
+	source := s.createGroupByTestDataFrame()
+	defer source.Release()
+	highlightType := testHighlightArrowType()
+	highlights, _, err := array.FromJSON(s.pool, highlightType, strings.NewReader(
+		`[[{"field_name":"h1","fragments":["1"],"scores":[]}], [{"field_name":"h2","fragments":["2"],"scores":[]}], [{"field_name":"h3","fragments":["3"],"scores":[]}], [{"field_name":"h4","fragments":["4"],"scores":[]}], [{"field_name":"h5","fragments":["5"],"scores":[]}], [{"field_name":"h6","fragments":["6"],"scores":[]}], [{"field_name":"h7","fragments":["7"],"scores":[]}], [{"field_name":"h8","fragments":["8"],"scores":[]}]]`,
+	))
+	s.Require().NoError(err)
+
+	builder := NewDataFrameBuilder().SetChunkSizes(source.ChunkSizes())
+	for _, name := range source.ColumnNames() {
+		s.Require().NoError(builder.AddColumnFrom(source, name))
+	}
+	s.Require().NoError(builder.AddColumnFromChunks("highlight", []arrow.Array{highlights}))
+	df := builder.Build()
+	defer df.Release()
+
+	result, err := NewFuncChainWithAllocator(s.pool).
+		SetStage(types.StageL2Rerank).
+		GroupBy("category", 1, 3, 0).
+		Execute(df)
+	s.Require().NoError(err)
+	defer result.Release()
+
+	s.Equal([]int64{1, 6, 7}, result.Column(types.IDFieldName).Chunk(0).(*array.Int64).Int64Values())
+	expected, _, err := array.FromJSON(s.pool, highlightType, strings.NewReader(
+		`[[{"field_name":"h1","fragments":["1"],"scores":[]}], [{"field_name":"h6","fragments":["6"],"scores":[]}], [{"field_name":"h7","fragments":["7"],"scores":[]}]]`,
+	))
+	s.Require().NoError(err)
+	defer expected.Release()
+	s.True(array.Equal(expected, result.Column("highlight").Chunk(0)))
 }
 
 func (s *GroupByOpTestSuite) TestGroupByOp_GroupSizeLimit() {

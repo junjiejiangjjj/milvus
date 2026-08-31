@@ -389,6 +389,7 @@ func TestProtoStageToReprStage(t *testing.T) {
 func TestIsFunctionChainSystemName(t *testing.T) {
 	assert.True(t, IsFunctionChainSystemName("$score"))
 	assert.True(t, IsFunctionChainSystemName("$id"))
+	assert.True(t, IsFunctionChainSystemName(types.HighlightFieldName))
 	assert.False(t, IsFunctionChainSystemName("score"))
 	assert.False(t, IsFunctionChainSystemName(""))
 }

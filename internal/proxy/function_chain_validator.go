@@ -18,6 +18,8 @@ package proxy
 import (
 	"strings"
 
+	"github.com/apache/arrow/go/v17/arrow/memory"
+
 	"github.com/milvus-io/milvus-proto/go-api/v3/commonpb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
@@ -37,12 +39,42 @@ func (m *functionChainRerankMeta) GetInputFieldNames() []string { return m.input
 func (m *functionChainRerankMeta) GetInputFieldIDs() []int64    { return m.inputFieldIDs }
 
 func hasFunctionRerank(request *milvuspb.SearchRequest) bool {
-	return request.GetFunctionScore() != nil || len(request.GetFunctionChains()) > 0
+	return request.GetFunctionScore() != nil || hasFunctionChainRerankStage(request.GetFunctionChains())
 }
 
 func validateFunctionChainSearchRequest(request *milvuspb.SearchRequest, _ bool) error {
-	if request.GetFunctionScore() != nil && len(request.GetFunctionChains()) > 0 {
+	if request.GetFunctionScore() != nil && hasFunctionChainRerankStage(request.GetFunctionChains()) {
 		return merr.WrapErrParameterInvalidMsg("function_score and function_chains cannot be used together")
+	}
+	return nil
+}
+
+func validatePostProcessCompatibility(
+	postProcessChains []*schemapb.FunctionChain,
+	hasOrderBy bool,
+	hasHighlighter bool,
+	isSearchAggregation bool,
+) error {
+	if len(postProcessChains) > 1 {
+		return merr.WrapErrParameterInvalidMsg("function chain stage %s appears more than once",
+			schemapb.FunctionChainStage_FunctionChainStagePostProcess.String())
+	}
+
+	hasPostProcess := len(postProcessChains) == 1
+	if hasPostProcess && hasOrderBy {
+		return merr.WrapErrParameterInvalidMsg("explicit post-process function chain and order_by_fields cannot be used together")
+	}
+	if hasPostProcess && hasHighlighter {
+		return merr.WrapErrParameterInvalidMsg("explicit post-process function chain and highlighter cannot be used together")
+	}
+	if hasPostProcess && isSearchAggregation {
+		return merr.WrapErrParameterInvalidMsg("post process is not supported with search_aggregation")
+	}
+	if hasOrderBy && isSearchAggregation {
+		return merr.WrapErrParameterInvalidMsg("order_by_fields is not supported with search_aggregation")
+	}
+	if hasHighlighter && isSearchAggregation {
+		return merr.WrapErrParameterInvalidMsg("highlighter and search_aggregation cannot be used simultaneously")
 	}
 	return nil
 }
@@ -91,6 +123,21 @@ func hasExplicitLegacyReranker(params []*commonpb.KeyValuePair) bool {
 	return false
 }
 
+func hasFunctionChainRerankStage(chains []*schemapb.FunctionChain) bool {
+	for _, chainPB := range chains {
+		if chainPB == nil {
+			continue
+		}
+		switch chainPB.GetStage() {
+		case schemapb.FunctionChainStage_FunctionChainStageL0Rerank,
+			schemapb.FunctionChainStage_FunctionChainStageL1Rerank,
+			schemapb.FunctionChainStage_FunctionChainStageL2Rerank:
+			return true
+		}
+	}
+	return false
+}
+
 func hasFunctionChainStage(chains []*schemapb.FunctionChain, target schemapb.FunctionChainStage) bool {
 	for _, chainPB := range chains {
 		if chainPB != nil && chainPB.GetStage() == target {
@@ -100,18 +147,19 @@ func hasFunctionChainStage(chains []*schemapb.FunctionChain, target schemapb.Fun
 	return false
 }
 
-func splitFunctionChainsByStage(chains []*schemapb.FunctionChain) ([]*schemapb.FunctionChain, []*schemapb.FunctionChain, error) {
+func splitFunctionChainsByStage(chains []*schemapb.FunctionChain) ([]*schemapb.FunctionChain, []*schemapb.FunctionChain, []*schemapb.FunctionChain, error) {
 	l2Chains := make([]*schemapb.FunctionChain, 0)
 	querynodeChains := make([]*schemapb.FunctionChain, 0)
+	postProcessChains := make([]*schemapb.FunctionChain, 0)
 	seenStages := make(map[schemapb.FunctionChainStage]struct{}, len(chains))
 
 	for i, chainPB := range chains {
 		if chainPB == nil {
-			return nil, nil, merr.WrapErrParameterInvalidMsg("function chain[%d] is nil", i)
+			return nil, nil, nil, merr.WrapErrParameterInvalidMsg("function chain[%d] is nil", i)
 		}
 		stage := chainPB.GetStage()
 		if _, ok := seenStages[stage]; ok {
-			return nil, nil, merr.WrapErrParameterInvalidMsg("function chain stage %s appears more than once", stage.String())
+			return nil, nil, nil, merr.WrapErrParameterInvalidMsg("function chain stage %s appears more than once", stage.String())
 		}
 		seenStages[stage] = struct{}{}
 
@@ -121,15 +169,124 @@ func splitFunctionChainsByStage(chains []*schemapb.FunctionChain) ([]*schemapb.F
 		case schemapb.FunctionChainStage_FunctionChainStageL0Rerank,
 			schemapb.FunctionChainStage_FunctionChainStageL1Rerank:
 			if len(chainPB.GetOps()) == 0 {
-				return nil, nil, merr.WrapErrParameterInvalidMsg("function chain[%d] must contain at least one op", i)
+				return nil, nil, nil, merr.WrapErrParameterInvalidMsg("function chain[%d] must contain at least one op", i)
 			}
 			querynodeChains = append(querynodeChains, chainPB)
+		case schemapb.FunctionChainStage_FunctionChainStagePostProcess:
+			postProcessChains = append(postProcessChains, chainPB)
 		default:
-			return nil, nil, merr.WrapErrParameterInvalidMsg("function chain[%d] stage %s is not supported in search request", i, stage.String())
+			return nil, nil, nil, merr.WrapErrParameterInvalidMsg("function chain[%d] stage %s is not supported in search request", i, stage.String())
 		}
 	}
 
-	return l2Chains, querynodeChains, nil
+	return l2Chains, querynodeChains, postProcessChains, nil
+}
+
+func validatePostProcessChain(chainPB *schemapb.FunctionChain) (*chain.ChainRepr, error) {
+	if chainPB == nil {
+		return nil, merr.WrapErrParameterInvalidMsg("post-process function chain is nil")
+	}
+	if chainPB.GetStage() != schemapb.FunctionChainStage_FunctionChainStagePostProcess {
+		return nil, merr.WrapErrParameterInvalidMsg("expected post-process function chain, got stage %s", chainPB.GetStage().String())
+	}
+	if len(chainPB.GetOps()) == 0 {
+		return nil, merr.WrapErrParameterInvalidMsg("post-process function chain must contain at least one op")
+	}
+
+	repr, err := chain.ProtoChainToRepr(chainPB)
+	if err != nil {
+		return nil, merr.Wrap(err, "invalid post-process function chain")
+	}
+
+	for i, op := range repr.Operators {
+		switch op.Type {
+		case chaintypes.OpTypeMap, chaintypes.OpTypeSort, chaintypes.OpTypeLimit:
+		default:
+			return nil, merr.WrapErrParameterInvalidMsg(
+				"post-process function chain op[%d] type %q is not supported; only map, sort, and limit are allowed", i, op.Type)
+		}
+
+		for _, output := range op.Outputs {
+			// A $meta["..."] output is a dynamic-field path, not a write to
+			// the $meta system column itself. Its full syntax is validated by
+			// the PostProcess column planner.
+			isDynamicOutput := strings.HasPrefix(output, `$meta["`)
+			if chain.IsFunctionChainSystemName(output) &&
+				output != chaintypes.HighlightFieldName && !isDynamicOutput {
+				return nil, merr.WrapErrParameterInvalidMsg(
+					"post-process function chain cannot write system output %q; only %s is writable",
+					output, chaintypes.HighlightFieldName)
+			}
+		}
+	}
+	return repr, nil
+}
+
+func validatePostProcessCurrentCapabilities(repr *chain.ChainRepr, schema *schemaInfo) error {
+	if repr == nil {
+		return merr.WrapErrParameterInvalidMsg("post-process function chain repr is nil")
+	}
+
+	for _, input := range repr.Info.RequiredInputs {
+		if isPostProcessDynamicPath(input) {
+			return merr.WrapErrParameterInvalidMsg(
+				"dynamic field input %q is not supported by post-process yet", input)
+		}
+		if isPostProcessJSONPath(input, schema) {
+			return merr.WrapErrParameterInvalidMsg(
+				"JSON path input %q is not supported by post-process yet", input)
+		}
+	}
+
+	for opIdx, op := range repr.Operators {
+		for _, output := range op.Outputs {
+			if isPostProcessDynamicPath(output) {
+				return merr.WrapErrParameterInvalidMsg(
+					"post-process function chain op[%d] dynamic field output %q is not supported yet", opIdx, output)
+			}
+			if isPostProcessJSONPath(output, schema) {
+				return merr.WrapErrParameterInvalidMsg(
+					"post-process function chain op[%d] JSON path output %q is not supported yet", opIdx, output)
+			}
+			if output == chaintypes.HighlightFieldName {
+				return merr.WrapErrParameterInvalidMsg(
+					"post-process function chain op[%d] output %q is not supported yet", opIdx, output)
+			}
+			if field := getPostProcessSchemaField(schema, output); field != nil {
+				return merr.WrapErrParameterInvalidMsg(
+					"post-process function chain op[%d] cannot overwrite schema field %q", opIdx, output)
+			}
+		}
+	}
+
+	if _, err := chain.FuncChainFromRepr(repr, memory.DefaultAllocator); err != nil {
+		return merr.Wrap(err, "invalid post-process function chain")
+	}
+	return nil
+}
+
+func getPostProcessSchemaField(schema *schemaInfo, name string) *schemapb.FieldSchema {
+	if schema == nil || schema.SchemaHelper == nil {
+		return nil
+	}
+	field, err := schema.SchemaHelper.GetFieldFromName(name)
+	if err != nil {
+		return nil
+	}
+	return field
+}
+
+func isPostProcessJSONPath(name string, schema *schemaInfo) bool {
+	pathStart := strings.IndexByte(name, '[')
+	if pathStart <= 0 {
+		return false
+	}
+	root := strings.TrimSpace(name[:pathStart])
+	if root == "$meta" {
+		return true
+	}
+	field := getPostProcessSchemaField(schema, root)
+	return field != nil && field.GetDataType() == schemapb.DataType_JSON
 }
 
 func newFunctionChainRerankMeta(chains []*schemapb.FunctionChain, schema *schemaInfo) (*functionChainRerankMeta, error) {

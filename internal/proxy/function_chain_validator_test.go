@@ -52,12 +52,90 @@ func TestValidateFunctionChainSearchRequest(t *testing.T) {
 		assert.Contains(t, err.Error(), "function_score and function_chains cannot be used together")
 	})
 
+	t.Run("function score and post process are independent", func(t *testing.T) {
+		err := validateFunctionChainSearchRequest(&milvuspb.SearchRequest{
+			FunctionScore:  &schemapb.FunctionScore{},
+			FunctionChains: []*schemapb.FunctionChain{postProcessFunctionChain(mapOp("display_score", "expr", columnArg(types.ScoreFieldName)))},
+		}, false)
+		require.NoError(t, err)
+	})
+
 	t.Run("hybrid function chains are validated by hybrid selector", func(t *testing.T) {
 		err := validateFunctionChainSearchRequest(&milvuspb.SearchRequest{
 			FunctionChains: []*schemapb.FunctionChain{l2FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(types.ScoreFieldName)))},
 		}, true)
 		require.NoError(t, err)
 	})
+}
+
+func TestValidatePostProcessCompatibility(t *testing.T) {
+	postProcessChain := postProcessFunctionChain(
+		mapOp("display_score", "expr", columnArg(types.ScoreFieldName)),
+	)
+
+	for _, tc := range []struct {
+		name                string
+		postProcessChains   []*schemapb.FunctionChain
+		hasOrderBy          bool
+		hasHighlighter      bool
+		searchAggregation   bool
+		expectedErrContains string
+	}{
+		{name: "no post process"},
+		{name: "explicit post process", postProcessChains: []*schemapb.FunctionChain{postProcessChain}},
+		{name: "legacy order by and highlighter", hasOrderBy: true, hasHighlighter: true},
+		{
+			name:                "duplicate post process",
+			postProcessChains:   []*schemapb.FunctionChain{postProcessChain, postProcessChain},
+			expectedErrContains: "appears more than once",
+		},
+		{
+			name:                "post process and order by",
+			postProcessChains:   []*schemapb.FunctionChain{postProcessChain},
+			hasOrderBy:          true,
+			expectedErrContains: "post-process function chain and order_by_fields",
+		},
+		{
+			name:                "post process and highlighter",
+			postProcessChains:   []*schemapb.FunctionChain{postProcessChain},
+			hasHighlighter:      true,
+			expectedErrContains: "post-process function chain and highlighter",
+		},
+		{
+			name:                "post process and search aggregation",
+			postProcessChains:   []*schemapb.FunctionChain{postProcessChain},
+			searchAggregation:   true,
+			expectedErrContains: "post process is not supported with search_aggregation",
+		},
+		{
+			name:                "order by and search aggregation",
+			hasOrderBy:          true,
+			searchAggregation:   true,
+			expectedErrContains: "order_by_fields is not supported with search_aggregation",
+		},
+		{
+			name:                "highlighter and search aggregation",
+			hasHighlighter:      true,
+			searchAggregation:   true,
+			expectedErrContains: "highlighter and search_aggregation cannot be used simultaneously",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePostProcessCompatibility(
+				tc.postProcessChains,
+				tc.hasOrderBy,
+				tc.hasHighlighter,
+				tc.searchAggregation,
+			)
+			if tc.expectedErrContains == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+			assert.Contains(t, err.Error(), tc.expectedErrContains)
+		})
+	}
 }
 
 func TestSelectHybridRerankMeta(t *testing.T) {
@@ -159,32 +237,47 @@ func TestSelectHybridRerankMeta(t *testing.T) {
 	})
 }
 
+func TestHasFunctionRerank(t *testing.T) {
+	assert.False(t, hasFunctionRerank(&milvuspb.SearchRequest{
+		FunctionChains: []*schemapb.FunctionChain{
+			postProcessFunctionChain(mapOp("display_score", "expr", columnArg(types.ScoreFieldName))),
+		},
+	}))
+	assert.True(t, hasFunctionRerank(&milvuspb.SearchRequest{FunctionScore: &schemapb.FunctionScore{}}))
+	assert.True(t, hasFunctionRerank(&milvuspb.SearchRequest{
+		FunctionChains: []*schemapb.FunctionChain{l1FunctionChain()},
+	}))
+}
+
 func TestSplitFunctionChainsByStage(t *testing.T) {
-	t.Run("split l0 l1 and l2 chains", func(t *testing.T) {
+	t.Run("split l0 l1 l2 and post-process chains", func(t *testing.T) {
 		l0Chain := l0FunctionChain(mapOp(types.ScoreFieldName, "xgboost", columnArg("pk")))
 		l1Chain := l1FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(types.ScoreFieldName)))
 		l2Chain := l2FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(types.ScoreFieldName)))
+		postProcessChain := postProcessFunctionChain(mapOp("display_score", "expr", columnArg(types.ScoreFieldName)))
 
-		l2Chains, querynodeChains, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{l0Chain, l1Chain, l2Chain})
+		l2Chains, querynodeChains, postProcessChains, err := splitFunctionChainsByStage(
+			[]*schemapb.FunctionChain{l0Chain, l1Chain, l2Chain, postProcessChain})
 		require.NoError(t, err)
 		assert.Equal(t, []*schemapb.FunctionChain{l2Chain}, l2Chains)
 		assert.Equal(t, []*schemapb.FunctionChain{l0Chain, l1Chain}, querynodeChains)
+		assert.Equal(t, []*schemapb.FunctionChain{postProcessChain}, postProcessChains)
 	})
 
 	t.Run("empty l0 chain", func(t *testing.T) {
-		_, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{l0FunctionChain()})
+		_, _, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{l0FunctionChain()})
 		require.ErrorIs(t, err, merr.ErrParameterInvalid)
 		assert.Contains(t, err.Error(), "function chain[0] must contain at least one op")
 	})
 
 	t.Run("nil chain", func(t *testing.T) {
-		_, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{nil})
+		_, _, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{nil})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "function chain[0] is nil")
 	})
 
 	t.Run("duplicate stage", func(t *testing.T) {
-		_, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{
+		_, _, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{
 			l0FunctionChain(mapOp(types.ScoreFieldName, "xgboost", columnArg("pk"))),
 			l0FunctionChain(mapOp(types.ScoreFieldName, "xgboost", columnArg("pk"))),
 		})
@@ -193,19 +286,132 @@ func TestSplitFunctionChainsByStage(t *testing.T) {
 	})
 
 	t.Run("empty l1 chain", func(t *testing.T) {
-		_, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{l1FunctionChain()})
+		_, _, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{l1FunctionChain()})
 		require.ErrorIs(t, err, merr.ErrParameterInvalid)
 		assert.Contains(t, err.Error(), "function chain[0] must contain at least one op")
 	})
 
 	t.Run("duplicate l1 stage", func(t *testing.T) {
-		_, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{
+		_, _, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{
 			l1FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(types.ScoreFieldName))),
 			l1FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(types.ScoreFieldName))),
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "appears more than once")
 	})
+
+	t.Run("duplicate post-process stage", func(t *testing.T) {
+		_, _, _, err := splitFunctionChainsByStage([]*schemapb.FunctionChain{
+			postProcessFunctionChain(mapOp("a", "expr", columnArg(types.ScoreFieldName))),
+			postProcessFunctionChain(mapOp("b", "expr", columnArg(types.ScoreFieldName))),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "FunctionChainStagePostProcess appears more than once")
+	})
+}
+
+func TestValidatePostProcessChain(t *testing.T) {
+	t.Run("map sort limit", func(t *testing.T) {
+		chainPB := postProcessFunctionChain(
+			mapOp("display_score", "expr", columnArg(types.ScoreFieldName)),
+			&schemapb.FunctionChainOp{
+				Op:     types.OpTypeSort,
+				Inputs: []string{"display_score", types.IDFieldName},
+				Params: map[string]*schemapb.FunctionParamValue{
+					"orders":      chainStringArrayParam("desc", "asc"),
+					"null_orders": chainStringArrayParam("nulls_last", "nulls_last"),
+				},
+			},
+			postProcessLimitOp(10),
+		)
+		repr, err := validatePostProcessChain(chainPB)
+		require.NoError(t, err)
+		assert.Len(t, repr.Operators, 3)
+	})
+
+	t.Run("operators execute in declaration order", func(t *testing.T) {
+		chainPB := postProcessFunctionChain(
+			postProcessLimitOp(10),
+			&schemapb.FunctionChainOp{Op: types.OpTypeSort, Inputs: []string{types.ScoreFieldName}},
+			postProcessLimitOp(5),
+			&schemapb.FunctionChainOp{Op: types.OpTypeSort, Inputs: []string{types.IDFieldName}},
+		)
+		repr, err := validatePostProcessChain(chainPB)
+		require.NoError(t, err)
+		assert.Len(t, repr.Operators, 4)
+	})
+
+	t.Run("validator defers operator parameter validation", func(t *testing.T) {
+		chainPB := postProcessFunctionChain(
+			&schemapb.FunctionChainOp{Op: types.OpTypeMap, Inputs: []string{types.ScoreFieldName}, Outputs: []string{"display_score"}},
+			&schemapb.FunctionChainOp{Op: types.OpTypeLimit},
+			&schemapb.FunctionChainOp{
+				Op:     types.OpTypeSort,
+				Inputs: []string{types.ScoreFieldName, types.IDFieldName},
+				Params: map[string]*schemapb.FunctionParamValue{"orders": chainStringArrayParam("desc")},
+			},
+		)
+		repr, err := validatePostProcessChain(chainPB)
+		require.NoError(t, err)
+		assert.Len(t, repr.Operators, 3)
+	})
+
+	t.Run("writable outputs", func(t *testing.T) {
+		chainPB := postProcessFunctionChain(
+			mapOp("temporary", "expr", columnArg(types.ScoreFieldName)),
+			mapOp(`$meta["profile"]["score"]`, "expr", columnArg("temporary")),
+			mapOp(types.HighlightFieldName, "expr", columnArg("temporary")),
+		)
+		repr, err := validatePostProcessChain(chainPB)
+		require.NoError(t, err)
+		assert.Len(t, repr.Operators, 3)
+	})
+
+	for _, tc := range []struct {
+		name        string
+		chain       *schemapb.FunctionChain
+		errContains string
+	}{
+		{name: "empty", chain: postProcessFunctionChain(), errContains: "must contain at least one op"},
+		{
+			name:        "wrong stage",
+			chain:       l2FunctionChain(mapOp("display_score", "expr", columnArg(types.ScoreFieldName))),
+			errContains: "expected post-process function chain",
+		},
+		{
+			name:        "unsupported op",
+			chain:       postProcessFunctionChain(&schemapb.FunctionChainOp{Op: types.OpTypeFilter}),
+			errContains: "only map, sort, and limit are allowed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repr, err := validatePostProcessChain(tc.chain)
+			require.Error(t, err)
+			assert.Nil(t, repr)
+			assert.Contains(t, err.Error(), tc.errContains)
+		})
+	}
+
+	for _, output := range []string{
+		types.IDFieldName,
+		types.ScoreFieldName,
+		types.SegOffsetFieldName,
+		types.GroupByFieldName,
+		types.ElementIndicesFieldName,
+		"$meta",
+		"$highlight.extra",
+		"$raw.meta",
+		"$unknown",
+	} {
+		t.Run("reject system output "+output, func(t *testing.T) {
+			repr, err := validatePostProcessChain(postProcessFunctionChain(
+				mapOp(output, "expr", columnArg(types.ScoreFieldName)),
+			))
+			require.Error(t, err)
+			assert.Nil(t, repr)
+			assert.Contains(t, err.Error(), "only $highlight is writable")
+		})
+	}
 }
 
 func TestNewFunctionChainRerankMeta(t *testing.T) {
@@ -560,6 +766,40 @@ func l1FunctionChain(ops ...*schemapb.FunctionChainOp) *schemapb.FunctionChain {
 	return &schemapb.FunctionChain{
 		Stage: schemapb.FunctionChainStage_FunctionChainStageL1Rerank,
 		Ops:   ops,
+	}
+}
+
+func postProcessFunctionChain(ops ...*schemapb.FunctionChainOp) *schemapb.FunctionChain {
+	return &schemapb.FunctionChain{
+		Stage: schemapb.FunctionChainStage_FunctionChainStagePostProcess,
+		Ops:   ops,
+	}
+}
+
+func postProcessLimitOp(limit int64) *schemapb.FunctionChainOp {
+	return &schemapb.FunctionChainOp{
+		Op: types.OpTypeLimit,
+		Params: map[string]*schemapb.FunctionParamValue{
+			"limit": chainIntParam(limit),
+		},
+	}
+}
+
+func postProcessRoundDecimalMapOp(output, input string) *schemapb.FunctionChainOp {
+	op := mapOp(output, "round_decimal", columnArg(input))
+	op.Expr.Params["decimal"] = chainIntParam(2)
+	return op
+}
+
+func chainStringArrayParam(values ...string) *schemapb.FunctionParamValue {
+	items := make([]*schemapb.FunctionParamValue, 0, len(values))
+	for _, value := range values {
+		items = append(items, chainStringParam(value))
+	}
+	return &schemapb.FunctionParamValue{
+		Value: &schemapb.FunctionParamValue_ArrayValue{
+			ArrayValue: &schemapb.FunctionParamArray{Values: items},
+		},
 	}
 }
 

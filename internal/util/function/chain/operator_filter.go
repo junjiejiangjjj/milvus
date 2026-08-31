@@ -96,11 +96,19 @@ func (o *FilterOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame
 	}
 
 	filterCol := outputs[0]
+	if filterCol == nil {
+		return nil, merr.WrapErrFunctionFailedMsg("filter_op: function returned nil output")
+	}
 	defer filterCol.Release() // Release the temporary boolean column
 
 	// Validate the output is boolean type
 	if filterCol.DataType().ID() != arrow.BOOL {
 		return nil, merr.WrapErrFunctionFailedMsg("filter_op: function must return boolean type, got %s", filterCol.DataType().Name())
+	}
+	if len(filterCol.Chunks()) != input.NumChunks() {
+		return nil, merr.WrapErrFunctionFailedMsg(
+			"filter_op: function output chunk count %d does not match input chunk count %d",
+			len(filterCol.Chunks()), input.NumChunks())
 	}
 
 	// Create builder for result DataFrame
@@ -115,6 +123,11 @@ func (o *FilterOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame
 		if !ok {
 			return nil, merr.WrapErrFunctionFailedMsg("filter_op: chunk %d is not a boolean array", chunkIdx)
 		}
+		if int64(boolChunk.Len()) != input.chunkSizes[chunkIdx] {
+			return nil, merr.WrapErrFunctionFailedMsg(
+				"filter_op: function output chunk[%d] length %d does not match input chunk length %d",
+				chunkIdx, boolChunk.Len(), input.chunkSizes[chunkIdx])
+		}
 		filterChunks[chunkIdx] = boolChunk
 
 		// Count true values
@@ -128,6 +141,7 @@ func (o *FilterOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFrame
 	}
 
 	builder.SetChunkSizes(newChunkSizes)
+	builder.CopyAllMetadata(input)
 
 	// Use ChunkCollector for filtered chunks
 	colNames := input.ColumnNames()

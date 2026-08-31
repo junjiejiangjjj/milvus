@@ -229,6 +229,7 @@ func (o *GroupByOp) Execute(ctx *types.FuncContext, input *DataFrame) (*DataFram
 	defer builder.Release()
 
 	builder.SetChunkSizes(newChunkSizes)
+	builder.CopyAllMetadata(input)
 
 	// Add existing columns
 	for _, colName := range colNames {

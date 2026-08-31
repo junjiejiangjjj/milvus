@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // =============================================================================
@@ -341,6 +342,106 @@ func (s *DataFrameSuite) TestMetricType() {
 	s.Equal("IP", mt)
 }
 
+func (s *DataFrameSuite) TestValidateShapeValidLayouts() {
+	df := s.createTestDataFrame()
+	defer df.Release()
+	s.NoError(df.ValidateShape())
+
+	empty := NewDataFrameBuilder().Build()
+	defer empty.Release()
+	s.NoError(empty.ValidateShape())
+
+	zeroRows := NewDataFrameBuilder().SetChunkSizes([]int64{0, 0}).Build()
+	defer zeroRows.Release()
+	s.NoError(zeroRows.ValidateShape())
+}
+
+func (s *DataFrameSuite) TestValidateShapeRejectsInvalidLayouts() {
+	s.Run("nil dataframe", func() {
+		var df *DataFrame
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "dataframe is nil")
+	})
+
+	s.Run("negative chunk size", func() {
+		df := NewDataFrameBuilder().SetChunkSizes([]int64{-1}).Build()
+		defer df.Release()
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "must be non-negative")
+	})
+
+	s.Run("rows without columns", func() {
+		df := NewDataFrameBuilder().SetChunkSizes([]int64{1}).Build()
+		defer df.Release()
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "but no columns")
+	})
+
+	s.Run("schema is nil", func() {
+		df := s.buildShapeTestDataFrame([]int64{2}, [][]int64{{1, 2}})
+		defer df.Release()
+		df.schema = nil
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "schema is nil")
+	})
+
+	s.Run("schema field count", func() {
+		df := s.buildShapeTestDataFrame([]int64{2}, [][]int64{{1, 2}})
+		defer df.Release()
+		df.schema = arrow.NewSchema(nil, nil)
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "field count 0 does not match column count 1")
+	})
+
+	s.Run("name index", func() {
+		df := s.buildShapeTestDataFrame([]int64{2}, [][]int64{{1, 2}})
+		defer df.Release()
+		delete(df.nameIndex, "value")
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "name index count 0 does not match column count 1")
+	})
+
+	s.Run("schema type", func() {
+		df := s.buildShapeTestDataFrame([]int64{2}, [][]int64{{1, 2}})
+		defer df.Release()
+		df.schema = arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.BinaryTypes.String}}, nil)
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "does not match column type")
+	})
+
+	s.Run("chunk count", func() {
+		df := s.buildShapeTestDataFrame([]int64{1, 1}, [][]int64{{1}})
+		defer df.Release()
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "chunk count 1 does not match chunkSizes count 2")
+	})
+
+	s.Run("chunk length", func() {
+		df := s.buildShapeTestDataFrame([]int64{1}, [][]int64{{1, 2}})
+		defer df.Release()
+		err := df.ValidateShape()
+		s.Require().Error(err)
+		s.ErrorIs(err, merr.ErrServiceInternal)
+		s.Contains(err.Error(), "length 2 does not match chunkSizes[0] 1")
+	})
+}
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -392,6 +493,19 @@ func (s *DataFrameSuite) createTestDataFrame() *DataFrame {
 	df, err := FromSearchResultData(resultData, s.pool, []string{"int_col", "str_col"})
 	s.Require().NoError(err)
 	return df
+}
+
+func (s *DataFrameSuite) buildShapeTestDataFrame(chunkSizes []int64, valuesByChunk [][]int64) *DataFrame {
+	builder := NewDataFrameBuilder().SetChunkSizes(chunkSizes)
+	chunks := make([]arrow.Array, len(valuesByChunk))
+	for i, values := range valuesByChunk {
+		valueBuilder := array.NewInt64Builder(s.pool)
+		valueBuilder.AppendValues(values, nil)
+		chunks[i] = valueBuilder.NewArray()
+		valueBuilder.Release()
+	}
+	s.Require().NoError(builder.AddColumnFromChunks("value", chunks))
+	return builder.Build()
 }
 
 func TestDataFrameSuite(t *testing.T) {

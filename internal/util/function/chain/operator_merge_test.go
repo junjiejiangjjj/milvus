@@ -602,6 +602,34 @@ func (s *MergeHelperTestSuite) TestWithMetricTypesOption() {
 	s.NotNil(op.scoreNormFuncs[1]) // L2: needs direction conversion
 }
 
+func (s *MergeHelperTestSuite) TestMergePreservesOnlyCommonNonScoreMetadata() {
+	df1 := s.createDF([]int64{1}, []float32{0.9}, []int64{1})
+	df2 := s.createDF([]int64{2}, []float32{0.8}, []int64{1})
+	defer df1.Release()
+	defer df2.Release()
+	df1.metadata[types.MetadataKeyMetricType] = "COSINE"
+	df2.metadata[types.MetadataKeyMetricType] = "COSINE"
+	df1.metadata["common"] = "same"
+	df2.metadata["common"] = "same"
+	df1.metadata["conflict"] = "left"
+	df2.metadata["conflict"] = "right"
+	df1.metadata["left_only"] = "value"
+
+	result, err := NewMergeOp(MergeStrategyRRF).ExecuteMulti(
+		types.NewFuncContextFull(context.TODO(), s.pool, "rerank"), []*DataFrame{df1, df2})
+	s.Require().NoError(err)
+	defer result.Release()
+	common, ok := result.Metadata("common")
+	s.True(ok)
+	s.Equal("same", common)
+	_, ok = result.Metadata("conflict")
+	s.False(ok)
+	_, ok = result.Metadata("left_only")
+	s.False(ok)
+	_, ok = result.MetricType()
+	s.False(ok, "merged scores must not inherit an input metric domain")
+}
+
 func (s *MergeHelperTestSuite) TestWithNormalizeOption() {
 	op := NewMergeOp(MergeStrategyRRF, WithNormalize(false))
 	// No metric types + normalize=false → sortDescending=true (default), no normFuncs
@@ -1730,7 +1758,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMisalignedSystemColumn() {
 	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 	_, err := op.Execute(ctx, df)
 	s.Error(err)
-	s.Contains(err.Error(), "$id has 1 rows, expected 2")
+	s.Contains(err.Error(), "column \"$id\" chunk[0] length 1 does not match chunkSizes[0] 2")
+	s.True(errors.Is(err, merr.ErrServiceInternal))
 }
 
 func (s *MergeHelperTestSuite) TestMergeElementIdentityAndSourceGathering() {
@@ -1966,7 +1995,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedInputLayouts() {
 		ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 
 		_, err := NewMergeOp(MergeStrategyRRF).Execute(ctx, df)
-		s.ErrorContains(err, "column $id has 1 chunks, expected 2")
+		s.ErrorContains(err, "column \"$id\" chunk count 1 does not match chunkSizes count 2")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 
 	s.Run("score chunk count", func() {
@@ -1986,7 +2016,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedInputLayouts() {
 		ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 
 		_, err := NewMergeOp(MergeStrategyWeighted, WithWeights([]float64{1})).Execute(ctx, df)
-		s.ErrorContains(err, "column $score has 1 chunks, expected 2")
+		s.ErrorContains(err, "column \"$score\" chunk count 1 does not match chunkSizes count 2")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 
 	s.Run("element chunk count", func() {
@@ -2006,7 +2037,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedInputLayouts() {
 		ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 
 		_, err := NewMergeOp(MergeStrategyRRF).Execute(ctx, df)
-		s.ErrorContains(err, "column $element_indices has 1 chunks, expected 2")
+		s.ErrorContains(err, "column \"$element_indices\" chunk count 1 does not match chunkSizes count 2")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 
 	s.Run("unsupported id type", func() {
@@ -2037,7 +2069,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedInputLayouts() {
 		ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 
 		_, err := NewMergeOp(MergeStrategyWeighted, WithWeights([]float64{1})).Execute(ctx, df)
-		s.ErrorContains(err, "column $score has 0 rows, expected 1")
+		s.ErrorContains(err, "column \"$score\" chunk[0] length 0 does not match chunkSizes[0] 1")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 
 	s.Run("element row count", func() {
@@ -2054,7 +2087,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedInputLayouts() {
 		ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 
 		_, err := NewMergeOp(MergeStrategyRRF).Execute(ctx, df)
-		s.ErrorContains(err, "column $element_indices has 0 rows, expected 1")
+		s.ErrorContains(err, "column \"$element_indices\" chunk[0] length 0 does not match chunkSizes[0] 1")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 }
 
@@ -2111,8 +2145,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedPassThroughFields() {
 		defer df.Release()
 
 		_, err := NewMergeOp(MergeStrategyRRF).Execute(ctx, df)
-		s.ErrorContains(err, "column payload missing chunk 1")
-		s.True(errors.Is(err, merr.ErrFunctionFailed))
+		s.ErrorContains(err, "column \"payload\" chunk count 1 does not match chunkSizes count 2")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 
 	s.Run("field row out of bounds", func() {
@@ -2132,8 +2166,8 @@ func (s *MergeHelperTestSuite) TestMergeRejectsMalformedPassThroughFields() {
 		defer df.Release()
 
 		_, err := NewMergeOp(MergeStrategyRRF).Execute(ctx, df)
-		s.ErrorContains(err, "column payload has no row 0")
-		s.True(errors.Is(err, merr.ErrFunctionFailed))
+		s.ErrorContains(err, "column \"payload\" chunk[0] length 0 does not match chunkSizes[0] 1")
+		s.True(errors.Is(err, merr.ErrServiceInternal))
 	})
 }
 

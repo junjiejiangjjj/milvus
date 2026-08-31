@@ -19,11 +19,15 @@
 package chain
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/apache/arrow/go/v17/arrow"
 	"github.com/apache/arrow/go/v17/arrow/array"
 	"github.com/apache/arrow/go/v17/arrow/memory"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/milvus-io/milvus/internal/util/function/chain/types"
 )
 
 type BaseOpTestSuite struct {
@@ -41,6 +45,18 @@ func (s *BaseOpTestSuite) TearDownTest() {
 
 func TestBaseOpTestSuite(t *testing.T) {
 	suite.Run(t, new(BaseOpTestSuite))
+}
+
+func testHighlightArrowType() arrow.DataType {
+	return types.HighlightArrowType()
+}
+
+func testNullableHighlightArrowType() arrow.DataType {
+	return arrow.ListOf(arrow.StructOf(
+		arrow.Field{Name: "field_name", Type: arrow.BinaryTypes.String, Nullable: true},
+		arrow.Field{Name: "fragments", Type: arrow.ListOf(arrow.BinaryTypes.String), Nullable: true},
+		arrow.Field{Name: "scores", Type: arrow.ListOf(arrow.PrimitiveTypes.Float32), Nullable: true},
+	))
 }
 
 func (s *BaseOpTestSuite) TestBaseOpInputsOutputs() {
@@ -309,6 +325,160 @@ func (s *BaseOpTestSuite) TestDispatchPickByIndicesEmptyIndices() {
 	defer result.Release()
 
 	s.Equal(0, result.Len())
+}
+
+func (s *BaseOpTestSuite) TestDispatchPickByIndicesDuplicateIndices() {
+	builder := array.NewInt64Builder(s.pool)
+	builder.AppendValues([]int64{10, 20, 30}, nil)
+	values := builder.NewArray()
+	builder.Release()
+	defer values.Release()
+
+	result, err := dispatchPickByIndices(s.pool, values, []int{2, 2, 0})
+	s.Require().NoError(err)
+	defer result.Release()
+
+	s.Equal([]int64{30, 30, 10}, result.(*array.Int64).Int64Values())
+}
+
+func (s *BaseOpTestSuite) TestDispatchPickByIndicesNilArray() {
+	_, err := dispatchPickByIndices(s.pool, nil, nil)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "nil array")
+}
+
+func (s *BaseOpTestSuite) TestDispatchPickByIndicesBinary() {
+	builder := array.NewBinaryBuilder(s.pool, arrow.BinaryTypes.Binary)
+	builder.Append([]byte("first"))
+	builder.AppendNull()
+	builder.Append([]byte("third"))
+	values := builder.NewArray()
+	builder.Release()
+	defer values.Release()
+
+	result, err := dispatchPickByIndices(s.pool, values, []int{2, 1, 0})
+	s.Require().NoError(err)
+	defer result.Release()
+
+	binaryResult := result.(*array.Binary)
+	s.Equal([]byte("third"), binaryResult.Value(0))
+	s.True(binaryResult.IsNull(1))
+	s.Equal([]byte("first"), binaryResult.Value(2))
+}
+
+func (s *BaseOpTestSuite) TestDispatchPickByIndicesLargeString() {
+	builder := array.NewLargeStringBuilder(s.pool)
+	builder.Append("first")
+	builder.AppendNull()
+	builder.Append("third")
+	values := builder.NewArray()
+	builder.Release()
+	defer values.Release()
+
+	result, err := dispatchPickByIndices(s.pool, values, []int{2, 1, 0})
+	s.Require().NoError(err)
+	defer result.Release()
+
+	stringResult := result.(*array.LargeString)
+	s.Equal("third", stringResult.Value(0))
+	s.True(stringResult.IsNull(1))
+	s.Equal("first", stringResult.Value(2))
+}
+
+func (s *BaseOpTestSuite) TestDispatchPickByIndicesNestedArrays() {
+	highlightType := testHighlightArrowType()
+
+	for _, test := range []struct {
+		name         string
+		dataType     arrow.DataType
+		valuesJSON   string
+		indices      []int
+		expectedJSON string
+	}{
+		{
+			name:         "list",
+			dataType:     arrow.ListOf(arrow.PrimitiveTypes.Int64),
+			valuesJSON:   `[[1,2], null, [], [3]]`,
+			indices:      []int{3, 0, 1, 0},
+			expectedJSON: `[[3], [1,2], null, [1,2]]`,
+		},
+		{
+			name:         "list child null",
+			dataType:     arrow.ListOf(arrow.PrimitiveTypes.Int64),
+			valuesJSON:   `[[1,null,2], [null], []]`,
+			indices:      []int{1, 0},
+			expectedJSON: `[[null], [1,null,2]]`,
+		},
+		{
+			name: "struct",
+			dataType: arrow.StructOf(
+				arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "score", Type: arrow.PrimitiveTypes.Float32, Nullable: true},
+			),
+			valuesJSON:   `[{"name":"a","score":1.0}, null, {"name":"c","score":3.0}]`,
+			indices:      []int{2, 0, 1},
+			expectedJSON: `[{"name":"c","score":3.0}, {"name":"a","score":1.0}, null]`,
+		},
+		{
+			name: "struct child null",
+			dataType: arrow.StructOf(
+				arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+				arrow.Field{Name: "score", Type: arrow.PrimitiveTypes.Float32, Nullable: true},
+			),
+			valuesJSON:   `[{"name":null,"score":1.0}, {"name":"b","score":null}]`,
+			indices:      []int{1, 0},
+			expectedJSON: `[{"name":"b","score":null}, {"name":null,"score":1.0}]`,
+		},
+		{
+			name:         "highlight list of struct",
+			dataType:     highlightType,
+			valuesJSON:   `[[{"field_name":"title","fragments":["a"],"scores":[]}], null, [{"field_name":"body","fragments":["b","c"],"scores":[0.5,0.4]}]]`,
+			indices:      []int{2, 0, 1},
+			expectedJSON: `[[{"field_name":"body","fragments":["b","c"],"scores":[0.5,0.4]}], [{"field_name":"title","fragments":["a"],"scores":[]}], null]`,
+		},
+		{
+			name:         "highlight child null",
+			dataType:     testNullableHighlightArrowType(),
+			valuesJSON:   `[[{"field_name":null,"fragments":["a",null],"scores":null}], []]`,
+			indices:      []int{1, 0},
+			expectedJSON: `[[], [{"field_name":null,"fragments":["a",null],"scores":null}]]`,
+		},
+	} {
+		s.Run(test.name, func() {
+			values, _, err := array.FromJSON(s.pool, test.dataType, strings.NewReader(test.valuesJSON))
+			s.Require().NoError(err)
+			defer values.Release()
+			expected, _, err := array.FromJSON(s.pool, test.dataType, strings.NewReader(test.expectedJSON))
+			s.Require().NoError(err)
+			defer expected.Release()
+
+			result, err := dispatchPickByIndices(s.pool, values, test.indices)
+			s.Require().NoError(err)
+			defer result.Release()
+			s.True(array.Equal(expected, result))
+		})
+	}
+}
+
+func (s *BaseOpTestSuite) TestDispatchPickByIndicesSlicedNestedArray() {
+	dataType := testHighlightArrowType()
+	values, _, err := array.FromJSON(s.pool, dataType, strings.NewReader(
+		`[[], [{"field_name":"a","fragments":["a1"],"scores":[]}], null, [{"field_name":"c","fragments":["c1"],"scores":[0.9]}], []]`,
+	))
+	s.Require().NoError(err)
+	defer values.Release()
+	sliced := array.NewSlice(values, 1, 4)
+	defer sliced.Release()
+	expected, _, err := array.FromJSON(s.pool, dataType, strings.NewReader(
+		`[[{"field_name":"c","fragments":["c1"],"scores":[0.9]}], [{"field_name":"a","fragments":["a1"],"scores":[]}], null]`,
+	))
+	s.Require().NoError(err)
+	defer expected.Release()
+
+	result, err := dispatchPickByIndices(s.pool, sliced, []int{2, 0, 1})
+	s.Require().NoError(err)
+	defer result.Release()
+	s.True(array.Equal(expected, result))
 }
 
 // =============================================================================

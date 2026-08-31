@@ -108,6 +108,10 @@ type searchTask struct {
 	// Order by fields for sorting results
 	orderByFields []OrderByField
 
+	// Explicit post-process plan. Legacy order-by and highlighter requests keep
+	// using their existing pipelines and leave this field nil.
+	postProcessPlan *PostProcessPlan
+
 	resolvedTimezoneStr string
 
 	isIterator bool
@@ -492,6 +496,9 @@ func (t *searchTask) initAdvancedSearchRequest(ctx context.Context) error {
 
 	var err error
 	var membershipFilterPlanSize int64
+	if hasFunctionChainStage(t.request.GetFunctionChains(), schemapb.FunctionChainStage_FunctionChainStagePostProcess) {
+		return merr.WrapErrParameterInvalidMsg("post process is not supported for hybrid search yet")
+	}
 	t.rerankMeta, err = selectHybridRerankMeta(t.request, t.schema)
 	if err != nil {
 		return err
@@ -545,11 +552,11 @@ func (t *searchTask) initAdvancedSearchRequest(ctx context.Context) error {
 	t.hybridElementLevel = false
 	queryFieldIDs := []int64{}
 	for index, subReq := range t.request.GetSubReqs() {
-		l2Chains, querynodeFunctionChains, err := splitFunctionChainsByStage(subReq.GetFunctionChains())
+		l2Chains, querynodeFunctionChains, postProcessChains, err := splitFunctionChainsByStage(subReq.GetFunctionChains())
 		if err != nil {
 			return merr.Wrapf(err, "sub-search[%d] function chains", index)
 		}
-		if len(l2Chains) > 0 {
+		if len(l2Chains) > 0 || len(postProcessChains) > 0 {
 			return merr.WrapErrParameterInvalidMsg(
 				"sub-search[%d] function chains only support L0 and L1 stages", index)
 		}
@@ -901,26 +908,44 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 	if err := validateFunctionChainSearchRequest(t.request, false); err != nil {
 		return err
 	}
-	var querynodeFunctionChains []*schemapb.FunctionChain
+	var l2Chains, querynodeFunctionChains, postProcessChains []*schemapb.FunctionChain
 	if len(t.request.GetFunctionChains()) > 0 {
-		l2Chains, qnChains, err := splitFunctionChainsByStage(t.request.GetFunctionChains())
+		l2Chains, querynodeFunctionChains, postProcessChains, err = splitFunctionChainsByStage(t.request.GetFunctionChains())
 		if err != nil {
 			return err
 		}
-		if len(l2Chains) > 0 {
-			meta, err := newFunctionChainRerankMeta(l2Chains, t.schema)
-			if err != nil {
-				return err
-			}
-			t.rerankMeta = meta
-		}
-		querynodeFunctionChains = qnChains
+	}
+	if err := validatePostProcessCompatibility(
+		postProcessChains,
+		len(t.orderByFields) > 0,
+		t.request.GetHighlighter() != nil,
+		t.aggCtx != nil,
+	); err != nil {
+		return err
+	}
 
-		if hasFunctionChainStage(qnChains, schemapb.FunctionChainStage_FunctionChainStageL1Rerank) && t.aggCtx != nil {
-			return merr.WrapErrParameterInvalidMsg("L1 function chain is not supported with search_aggregation")
+	var postProcessChain *schemapb.FunctionChain
+	if len(postProcessChains) == 1 {
+		postProcessChain = postProcessChains[0]
+	}
+	postProcessPlan, err := buildPostProcessPlan(postProcessChain, t.schema)
+	if err != nil {
+		return err
+	}
+	t.postProcessPlan = postProcessPlan
+
+	if len(l2Chains) > 0 {
+		meta, err := newFunctionChainRerankMeta(l2Chains, t.schema)
+		if err != nil {
+			return err
 		}
+		t.rerankMeta = meta
 	} else if t.request.FunctionScore != nil {
 		t.rerankMeta = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
+	}
+
+	if hasFunctionChainStage(querynodeFunctionChains, schemapb.FunctionChainStage_FunctionChainStageL1Rerank) && t.aggCtx != nil {
+		return merr.WrapErrParameterInvalidMsg("L1 function chain is not supported with search_aggregation")
 	}
 
 	// Search iterators use the final result score to derive the ANN continuation
@@ -983,12 +1008,19 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 		t.needRequery = false
 	} else {
 		allFields := typeutil.GetAllFieldSchemas(t.schema.CollectionSchema)
+		var postProcessInputFieldNames []string
+		if t.postProcessPlan != nil {
+			postProcessInputFieldNames = t.postProcessPlan.GetInputFieldNames()
+		}
 		vectorOutputFields := lo.Filter(allFields, func(field *schemapb.FieldSchema, _ int) bool {
 			return lo.Contains(t.translatedOutputFields, field.GetName()) && typeutil.IsVectorType(field.GetDataType())
 		})
 		// TEXT type output fields need requery since TEXT data is stored as LOB references
 		textOutputFields := lo.Filter(allFields, func(field *schemapb.FieldSchema, _ int) bool {
 			return lo.Contains(t.translatedOutputFields, field.GetName()) && typeutil.IsTextType(field.GetDataType())
+		})
+		postProcessTextInputFields := lo.Filter(allFields, func(field *schemapb.FieldSchema, _ int) bool {
+			return lo.Contains(postProcessInputFieldNames, field.GetName()) && typeutil.IsTextType(field.GetDataType())
 		})
 		switch strings.ToLower(paramtable.Get().CommonCfg.SearchRequeryPolicy.GetValue()) {
 		case "always":
@@ -1000,6 +1032,7 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 		default:
 			t.needRequery = len(vectorOutputFields) > 0 || len(textOutputFields) > 0
 		}
+		t.needRequery = t.needRequery || len(postProcessTextInputFields) > 0
 	}
 	if t.skipRequeryByNamespacePartitionMode() {
 		t.needRequery = false
@@ -1007,6 +1040,10 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 	var rerankInputFieldIDs []int64
 	if t.rerankMeta != nil {
 		rerankInputFieldIDs = t.rerankMeta.GetInputFieldIDs()
+	}
+	var postProcessInputFieldIDs []int64
+	if t.postProcessPlan != nil {
+		postProcessInputFieldIDs = t.postProcessPlan.GetInputFieldIDs()
 	}
 	if t.needRequery {
 		plan.OutputFieldIds = rerankInputFieldIDs
@@ -1017,6 +1054,7 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 		}
 		allFieldIDs := typeutil.NewSet[int64](t.OutputFieldsId...)
 		allFieldIDs.Insert(rerankInputFieldIDs...)
+		allFieldIDs.Insert(postProcessInputFieldIDs...)
 		allFieldIDs.Insert(primaryFieldSchema.FieldID)
 		plan.OutputFieldIds = allFieldIDs.Collect()
 		plan.DynamicFields = t.userDynamicFields
@@ -1055,6 +1093,12 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 	t.SerializedExprPlan, _, err = marshalPlanWithMembershipFilterSizeLimit(plan, 0)
 	if err != nil {
 		return err
+	}
+	// The explicit plan and all of its field dependencies are validated above,
+	// but execution is not wired into the search pipeline yet. Keep rejecting the
+	// request here so it cannot succeed while silently ignoring PostProcess.
+	if t.postProcessPlan != nil {
+		return merr.WrapErrParameterInvalidMsg("post-process function chain execution is not supported yet")
 	}
 	t.PkFilter = checkSegmentFilter(plan)
 	if typeutil.IsFieldSparseFloatVector(t.schema.CollectionSchema, t.FieldId) {
