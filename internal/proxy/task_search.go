@@ -501,7 +501,10 @@ func (t *searchTask) initAdvancedSearchRequest(ctx context.Context) error {
 		return err
 	}
 	if t.request.FunctionScore != nil {
-		t.rerankMeta = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
+		t.rerankMeta, err = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
+		if err != nil {
+			return err
+		}
 	} else {
 		t.rerankMeta = newRerankMetaFromLegacy(t.request.GetSearchParams())
 	}
@@ -912,7 +915,10 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 			return merr.WrapErrParameterInvalidMsg("L1 function chain is not supported with search_aggregation")
 		}
 	} else if t.request.FunctionScore != nil {
-		t.rerankMeta = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
+		t.rerankMeta, err = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Search iterators use the final result score to derive the ANN continuation
@@ -1018,6 +1024,20 @@ func (t *searchTask) initSearchRequest(ctx context.Context) error {
 			if len(highlightDynFields) > 0 {
 				dynFieldSet := typeutil.NewSet[string](plan.DynamicFields...)
 				dynFieldSet.Insert(highlightDynFields...)
+				plan.DynamicFields = dynFieldSet.Collect()
+			}
+		}
+		// An empty projection already fetches the complete dynamic root. When
+		// pruning keys, keep L2 inputs until reranking; userOutputFields still
+		// controls which dynamic keys are exposed in the client response.
+		if len(plan.DynamicFields) > 0 && t.rerankMeta != nil {
+			if inputPlan := t.rerankMeta.GetInputPlan(); inputPlan != nil {
+				dynFieldSet := typeutil.NewSet[string](plan.DynamicFields...)
+				for _, input := range inputPlan.Inputs {
+					if input.FieldName == common.MetaFieldName && len(input.NestedPath) > 0 {
+						dynFieldSet.Insert(input.NestedPath[0])
+					}
+				}
 				plan.DynamicFields = dynFieldSet.Collect()
 			}
 		}

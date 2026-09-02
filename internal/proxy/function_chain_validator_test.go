@@ -25,6 +25,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v3/milvuspb"
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/util/function/chain/types"
+	"github.com/milvus-io/milvus/pkg/v3/common"
 )
 
 func TestValidateFunctionChainSearchRequest(t *testing.T) {
@@ -130,6 +131,8 @@ func TestNewFunctionChainRerankMeta(t *testing.T) {
 		require.NotNil(t, meta)
 		assert.Empty(t, meta.GetInputFieldNames())
 		assert.Empty(t, meta.GetInputFieldIDs())
+		assert.NotNil(t, meta.inputPlan)
+		assert.Empty(t, meta.inputPlan.Inputs)
 		assert.Equal(t, chainPB, meta.chainPB)
 		assert.NotNil(t, meta.repr)
 	})
@@ -145,6 +148,76 @@ func TestNewFunctionChainRerankMeta(t *testing.T) {
 		require.NotNil(t, meta)
 		assert.Equal(t, []string{"ts"}, meta.GetInputFieldNames())
 		assert.Equal(t, []int64{101}, meta.GetInputFieldIDs())
+	})
+
+	t.Run("JSON and dynamic paths fetch physical roots", func(t *testing.T) {
+		jsonSchema := newFunctionChainJSONTestSchema()
+		op := mapOp(
+			types.ScoreFieldName,
+			"expr",
+			columnArg(`metadata["price"]`),
+			columnArg(`$meta["ctr"]`),
+		)
+		op.Params = map[string]*schemapb.FunctionParamValue{
+			types.InputDataTypesParam: chainDataTypesParam(schemapb.DataType_Double, schemapb.DataType_Int64),
+		}
+		chainPB := l2FunctionChain(op)
+
+		meta, err := newFunctionChainRerankMeta([]*schemapb.FunctionChain{chainPB}, jsonSchema)
+		require.NoError(t, err)
+		require.NotNil(t, meta)
+		assert.Equal(t, []string{"metadata", common.MetaFieldName}, meta.GetInputFieldNames())
+		assert.Equal(t, []int64{102, 103}, meta.GetInputFieldIDs())
+		require.NotNil(t, meta.inputPlan)
+		require.Len(t, meta.inputPlan.Inputs, 2)
+		assert.Equal(t, []string{"price"}, meta.inputPlan.Inputs[0].NestedPath)
+		assert.Equal(t, []string{"ctr"}, meta.inputPlan.Inputs[1].NestedPath)
+	})
+
+	t.Run("bare dynamic input is rejected", func(t *testing.T) {
+		_, err := newFunctionChainRerankMeta(
+			[]*schemapb.FunctionChain{l2FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg("ctr")))},
+			newFunctionChainJSONTestSchema(),
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must use explicit $meta[...] syntax")
+	})
+
+	t.Run("JSON path data type is required", func(t *testing.T) {
+		_, err := newFunctionChainRerankMeta(
+			[]*schemapb.FunctionChain{l2FunctionChain(mapOp(
+				types.ScoreFieldName,
+				"expr",
+				columnArg(`metadata["price"]`),
+			))},
+			newFunctionChainJSONTestSchema(),
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires an explicit data_type")
+	})
+
+	t.Run("complete JSON roots are rejected", func(t *testing.T) {
+		for _, input := range []string{"metadata", common.MetaFieldName} {
+			_, err := newFunctionChainRerankMeta(
+				[]*schemapb.FunctionChain{l2FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(input)))},
+				newFunctionChainJSONTestSchema(),
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "complete JSON root input is not supported")
+		}
+	})
+
+	t.Run("JSON data type is rejected for paths", func(t *testing.T) {
+		op := mapOp(types.ScoreFieldName, "expr", columnArg(`metadata["payload"]`))
+		op.Params = map[string]*schemapb.FunctionParamValue{
+			types.InputDataTypesParam: chainDataTypesParam(schemapb.DataType_JSON),
+		}
+		_, err := newFunctionChainRerankMeta(
+			[]*schemapb.FunctionChain{l2FunctionChain(op)},
+			newFunctionChainJSONTestSchema(),
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported JSON path data type hint JSON")
 	})
 
 	t.Run("merge generated system outputs are not user writes", func(t *testing.T) {
@@ -201,12 +274,6 @@ func TestNewFunctionChainRerankMeta(t *testing.T) {
 		assert.Contains(t, err.Error(), "Array")
 	})
 
-	t.Run("nil schema", func(t *testing.T) {
-		_, _, err := getFunctionChainInputField(nil, "ts")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "neither a previous output nor a collection field")
-	})
-
 	t.Run("duplicate stage", func(t *testing.T) {
 		_, err := newFunctionChainRerankMeta([]*schemapb.FunctionChain{
 			l2FunctionChain(mapOp(types.ScoreFieldName, "expr", columnArg(types.ScoreFieldName))),
@@ -241,7 +308,7 @@ func TestNewFunctionChainRerankMeta(t *testing.T) {
 		}, schema)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown")
-		assert.Contains(t, err.Error(), "neither a previous output nor a collection field")
+		assert.Contains(t, err.Error(), "field unknown not exist")
 	})
 
 	t.Run("unsupported system input", func(t *testing.T) {
@@ -249,7 +316,7 @@ func TestNewFunctionChainRerankMeta(t *testing.T) {
 			l2FunctionChain(mapOp("score1", "expr", columnArg("$timestamp"))),
 		}, schema)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "system input \"$timestamp\" is not supported")
+		assert.Contains(t, err.Error(), "unsupported function chain system input \"$timestamp\"")
 	})
 
 	t.Run("unsupported system output", func(t *testing.T) {
@@ -258,6 +325,17 @@ func TestNewFunctionChainRerankMeta(t *testing.T) {
 		}, schema)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "system output \"$id\" is not writable")
+	})
+
+	t.Run("JSON outputs are not writable", func(t *testing.T) {
+		for _, output := range []string{"metadata", `metadata["price"]`} {
+			_, err := newFunctionChainRerankMeta(
+				[]*schemapb.FunctionChain{l2FunctionChain(mapOp(output, "expr", columnArg(types.ScoreFieldName)))},
+				newFunctionChainJSONTestSchema(),
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "JSON root or path cannot be used")
+		}
 	})
 
 	t.Run("reserved temporary system output", func(t *testing.T) {
@@ -314,6 +392,20 @@ func newFunctionChainStructTestSchema() *schemaInfo {
 	})
 }
 
+func newFunctionChainJSONTestSchema() *schemaInfo {
+	return mustNewSchemaInfo(&schemapb.CollectionSchema{
+		EnableDynamicField: true,
+		Fields: []*schemapb.FieldSchema{
+			{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
+			{FieldID: 102, Name: "metadata", DataType: schemapb.DataType_JSON},
+			{
+				FieldID: 103, Name: common.MetaFieldName, DataType: schemapb.DataType_JSON,
+				IsDynamic: true,
+			},
+		},
+	})
+}
+
 func l2FunctionChain(ops ...*schemapb.FunctionChainOp) *schemapb.FunctionChain {
 	return &schemapb.FunctionChain{
 		Stage: schemapb.FunctionChainStage_FunctionChainStageL2Rerank,
@@ -362,6 +454,18 @@ func chainStringParam(value string) *schemapb.FunctionParamValue {
 func chainIntParam(value int64) *schemapb.FunctionParamValue {
 	return &schemapb.FunctionParamValue{
 		Value: &schemapb.FunctionParamValue_Int64Value{Int64Value: value},
+	}
+}
+
+func chainDataTypesParam(dataTypes ...schemapb.DataType) *schemapb.FunctionParamValue {
+	values := make([]*schemapb.FunctionParamValue, len(dataTypes))
+	for i, dataType := range dataTypes {
+		values[i] = chainIntParam(int64(dataType))
+	}
+	return &schemapb.FunctionParamValue{
+		Value: &schemapb.FunctionParamValue_ArrayValue{
+			ArrayValue: &schemapb.FunctionParamArray{Values: values},
+		},
 	}
 }
 
