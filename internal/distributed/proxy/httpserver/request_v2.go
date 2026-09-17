@@ -617,6 +617,7 @@ type SubSearchReq struct {
 	Offset            int32                  `json:"offset"`
 	SearchParams      map[string]interface{} `json:"params"`
 	ExprParams        map[string]interface{} `json:"exprParams"`
+	FunctionChains    []FunctionChainReq     `json:"functionChains"`
 	SearchAggregation *SearchAggregationReq  `json:"searchAggregation"`
 }
 
