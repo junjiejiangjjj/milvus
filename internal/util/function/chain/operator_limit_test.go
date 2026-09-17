@@ -20,6 +20,7 @@ package chain
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow/go/v17/arrow"
@@ -102,6 +103,24 @@ func (s *LimitOpTestSuite) TestLimitWithOffset() {
 	s.Equal(int64(4), idCol.Value(1))
 }
 
+func (s *LimitOpTestSuite) TestLimitPreservesGlobalMetadata() {
+	df := s.createLimitTestDF([]int64{1, 2}, []int64{2})
+	defer df.Release()
+	df.metadata[types.MetadataKeyMetricType] = "COSINE"
+	df.metadata["custom"] = "value"
+
+	result, err := NewLimitOp(1, 0).Execute(
+		types.NewFuncContextFull(context.TODO(), s.pool, types.StagePostProcess), df)
+	s.Require().NoError(err)
+	defer result.Release()
+	metricType, ok := result.MetricType()
+	s.True(ok)
+	s.Equal("COSINE", metricType)
+	custom, ok := result.Metadata("custom")
+	s.True(ok)
+	s.Equal("value", custom)
+}
+
 func (s *LimitOpTestSuite) TestLimitOffsetExceedsChunkSize() {
 	df := s.createLimitTestDF([]int64{1, 2, 3}, []int64{3})
 	defer df.Release()
@@ -149,6 +168,34 @@ func (s *LimitOpTestSuite) TestLimitMultiChunk() {
 	ids1 := result.Column(types.IDFieldName).Chunk(1).(*array.Int64)
 	s.Equal(int64(4), ids1.Value(0))
 	s.Equal(int64(5), ids1.Value(1))
+}
+
+func (s *LimitOpTestSuite) TestLimitPreservesHighlightAlignment() {
+	highlights, _, err := array.FromJSON(s.pool, types.HighlightArrowType(), strings.NewReader(
+		`[[{"field_name":"a","fragments":["a1"],"scores":[]}], [{"field_name":"b","fragments":["b1"],"scores":[]}], [{"field_name":"c","fragments":["c1"],"scores":[]}], [{"field_name":"d","fragments":["d1"],"scores":[]}]]`,
+	))
+	s.Require().NoError(err)
+	builder := NewDataFrameBuilder().SetChunkSizes([]int64{4})
+	idBuilder := array.NewInt64Builder(s.pool)
+	idBuilder.AppendValues([]int64{1, 2, 3, 4}, nil)
+	ids := idBuilder.NewArray()
+	idBuilder.Release()
+	s.Require().NoError(builder.AddColumnFromChunks(types.IDFieldName, []arrow.Array{ids}))
+	s.Require().NoError(builder.AddColumnFromChunks(types.HighlightFieldName, []arrow.Array{highlights}))
+	df := builder.Build()
+	defer df.Release()
+
+	result, err := NewLimitOp(2, 1).Execute(
+		types.NewFuncContextFull(context.TODO(), s.pool, types.StagePostProcess), df)
+	s.Require().NoError(err)
+	defer result.Release()
+	s.Equal([]int64{2, 3}, result.Column(types.IDFieldName).Chunk(0).(*array.Int64).Int64Values())
+	expected, _, err := array.FromJSON(s.pool, types.HighlightArrowType(), strings.NewReader(
+		`[[{"field_name":"b","fragments":["b1"],"scores":[]}], [{"field_name":"c","fragments":["c1"],"scores":[]}]]`,
+	))
+	s.Require().NoError(err)
+	defer expected.Release()
+	s.True(array.Equal(expected, result.Column(types.HighlightFieldName).Chunk(0)))
 }
 
 func (s *LimitOpTestSuite) TestLimitEmptyChunk() {

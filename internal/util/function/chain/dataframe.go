@@ -55,6 +55,8 @@ import (
 //	$score     [0.9,0.8,0.7] [0.6,0.5]   [0.4]
 //	chunkSizes: [3, 2, 1]
 type DataFrame struct {
+	// Result descriptors contain schema only, never external row data.
+	resultFields   map[string]*schemapb.FieldData
 	schema         *arrow.Schema                // Arrow schema with field metadata
 	columns        []*arrow.Chunked             // Chunked arrays, one per column
 	chunkSizes     []int64                      // Row count per chunk (corresponds to Topks)
@@ -86,6 +88,96 @@ func (df *DataFrame) NumChunks() int {
 // NumColumns returns the number of columns.
 func (df *DataFrame) NumColumns() int {
 	return len(df.columns)
+}
+
+// ValidateShape verifies that schema, columns, and per-query chunks describe
+// the same row layout. A shape violation is an internal pipeline contract
+// error: DataFrame values are produced by Milvus components, not user input.
+func (df *DataFrame) ValidateShape() error {
+	if df == nil {
+		return merr.WrapErrServiceInternalMsg("dataframe is nil")
+	}
+
+	columnCount := len(df.columns)
+	chunkCount := len(df.chunkSizes)
+	for chunkIdx, chunkSize := range df.chunkSizes {
+		if chunkSize < 0 {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe chunkSizes[%d] must be non-negative, got %d", chunkIdx, chunkSize)
+		}
+		if columnCount == 0 && chunkSize != 0 {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe chunkSizes[%d] is %d but no columns exist", chunkIdx, chunkSize)
+		}
+	}
+
+	if columnCount == 0 {
+		if df.schema != nil && len(df.schema.Fields()) != 0 {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe schema has %d fields but dataframe has no columns", len(df.schema.Fields()))
+		}
+		if len(df.nameIndex) != 0 {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe name index has %d entries but dataframe has no columns", len(df.nameIndex))
+		}
+		return nil
+	}
+
+	if df.schema == nil {
+		return merr.WrapErrServiceInternalMsg("dataframe schema is nil for %d columns", columnCount)
+	}
+	fields := df.schema.Fields()
+	if len(fields) != columnCount {
+		return merr.WrapErrServiceInternalMsg(
+			"dataframe schema field count %d does not match column count %d", len(fields), columnCount)
+	}
+	if len(df.nameIndex) != columnCount {
+		return merr.WrapErrServiceInternalMsg(
+			"dataframe name index count %d does not match column count %d", len(df.nameIndex), columnCount)
+	}
+
+	for colIdx, col := range df.columns {
+		field := fields[colIdx]
+		if col == nil {
+			return merr.WrapErrServiceInternalMsg("dataframe column[%d] %q is nil", colIdx, field.Name)
+		}
+		indexedAt, ok := df.nameIndex[field.Name]
+		if !ok {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe schema field[%d] %q is missing from name index", colIdx, field.Name)
+		}
+		if indexedAt != colIdx {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe schema field %q maps to column[%d], expected column[%d]", field.Name, indexedAt, colIdx)
+		}
+		if !arrow.TypeEqual(field.Type, col.DataType()) {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe schema field %q type %s does not match column type %s",
+				field.Name, field.Type, col.DataType())
+		}
+
+		chunks := col.Chunks()
+		if len(chunks) != chunkCount {
+			return merr.WrapErrServiceInternalMsg(
+				"dataframe column %q chunk count %d does not match chunkSizes count %d",
+				field.Name, len(chunks), chunkCount)
+		}
+		for chunkIdx, chunk := range chunks {
+			if chunk == nil {
+				return merr.WrapErrServiceInternalMsg(
+					"dataframe column %q chunk[%d] is nil", field.Name, chunkIdx)
+			}
+			actualSize := int64(chunk.Len())
+			expectedSize := df.chunkSizes[chunkIdx]
+			if actualSize != expectedSize {
+				return merr.WrapErrServiceInternalMsg(
+					"dataframe column %q chunk[%d] length %d does not match chunkSizes[%d] %d",
+					field.Name, chunkIdx, actualSize, chunkIdx, expectedSize)
+			}
+		}
+	}
+
+	return nil
 }
 
 // ChunkSizes returns the row count per chunk (same as Topks for search results).
@@ -412,6 +504,12 @@ func (b *DataFrameBuilder) AddColumnFromChunks(name string, chunks []arrow.Array
 func (b *DataFrameBuilder) CopyFieldMetadata(source *DataFrame, colName string) *DataFrameBuilder {
 	if b.result == nil {
 		return b
+	}
+	if field, ok := source.resultFields[colName]; ok {
+		if b.result.resultFields == nil {
+			b.result.resultFields = make(map[string]*schemapb.FieldData)
+		}
+		b.result.resultFields[colName] = field
 	}
 	if ft, ok := source.FieldType(colName); ok {
 		b.result.fieldTypes[colName] = ft

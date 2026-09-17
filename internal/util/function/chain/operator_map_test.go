@@ -30,6 +30,7 @@ import (
 
 	"github.com/milvus-io/milvus-proto/go-api/v3/schemapb"
 	"github.com/milvus-io/milvus/internal/util/function/chain/types"
+	"github.com/milvus-io/milvus/pkg/v3/util/merr"
 )
 
 // =============================================================================
@@ -105,6 +106,57 @@ func (e *wrongOutputCountExpr) Execute(ctx *types.FuncContext, inputs []*arrow.C
 	arr2.Release()
 
 	return []*arrow.Chunked{c1, c2}, nil
+}
+
+type mapContractExpr struct {
+	kind     string
+	declared []arrow.DataType
+}
+
+func (e *mapContractExpr) Name() string { return "map_contract" }
+func (e *mapContractExpr) OutputDataTypes() []arrow.DataType {
+	return e.declared
+}
+func (e *mapContractExpr) IsRunnable(stage string) bool { return true }
+
+func (e *mapContractExpr) Execute(ctx *types.FuncContext, inputs []*arrow.Chunked) ([]*arrow.Chunked, error) {
+	if e.kind == "nil" {
+		return []*arrow.Chunked{nil}, nil
+	}
+
+	chunks := make([]arrow.Array, len(inputs[0].Chunks()))
+	for chunkIdx, inputChunk := range inputs[0].Chunks() {
+		switch e.kind {
+		case "string", "partial_error":
+			builder := array.NewStringBuilder(ctx.Pool())
+			for rowIdx := 0; rowIdx < inputChunk.Len(); rowIdx++ {
+				builder.Append(fmt.Sprintf("row-%d", rowIdx))
+			}
+			chunks[chunkIdx] = builder.NewArray()
+			builder.Release()
+		default:
+			builder := array.NewFloat32Builder(ctx.Pool())
+			for rowIdx := 0; rowIdx < inputChunk.Len(); rowIdx++ {
+				builder.Append(float32(rowIdx))
+			}
+			chunks[chunkIdx] = builder.NewArray()
+			builder.Release()
+		}
+	}
+	var dataType arrow.DataType
+	if e.kind == "string" || e.kind == "partial_error" {
+		dataType = arrow.BinaryTypes.String
+	} else {
+		dataType = arrow.PrimitiveTypes.Float32
+	}
+	output := arrow.NewChunked(dataType, chunks)
+	for _, chunk := range chunks {
+		chunk.Release()
+	}
+	if e.kind == "partial_error" {
+		return []*arrow.Chunked{output}, fmt.Errorf("partial output error")
+	}
+	return []*arrow.Chunked{output}, nil
 }
 
 // =============================================================================
@@ -278,7 +330,76 @@ func (s *MapOpTestSuite) TestMapOpExecuteOutputCountMismatchAtRuntime() {
 	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
 	_, err = op.Execute(ctx, df)
 	s.Error(err)
+	s.ErrorIs(err, merr.ErrFunctionFailed)
 	s.Contains(err.Error(), "function returned 2 outputs, expected 1")
+}
+
+func (s *MapOpTestSuite) TestMapOpRejectsNilAndMismatchedOutputType() {
+	for _, test := range []struct {
+		name        string
+		kind        string
+		errContains string
+	}{
+		{name: "nil output", kind: "nil", errContains: "output[0] \"out\" is nil"},
+		{name: "type mismatch", kind: "string", errContains: "type utf8 does not match declared type float32"},
+	} {
+		s.Run(test.name, func() {
+			df := s.createTestDF([]int64{1}, []float32{1}, []int64{1})
+			defer df.Release()
+			fn := &mapContractExpr{kind: test.kind, declared: []arrow.DataType{arrow.PrimitiveTypes.Float32}}
+			op, err := NewMapOp(fn, []string{types.ScoreFieldName}, []string{"out"})
+			s.Require().NoError(err)
+			ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
+			_, err = op.Execute(ctx, df)
+			s.Require().Error(err)
+			s.ErrorIs(err, merr.ErrFunctionFailed)
+			s.Contains(err.Error(), test.errContains)
+		})
+	}
+}
+
+func (s *MapOpTestSuite) TestMapOpAllowsDynamicOutputType() {
+	df := s.createTestDF([]int64{1, 2}, []float32{1, 2}, []int64{2})
+	defer df.Release()
+	fn := &mapContractExpr{kind: "string", declared: nil}
+	op, err := NewMapOp(fn, []string{types.ScoreFieldName}, []string{"dynamic"})
+	s.Require().NoError(err)
+	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
+	result, err := op.Execute(ctx, df)
+	s.Require().NoError(err)
+	defer result.Release()
+	s.Equal(arrow.STRING, result.Column("dynamic").DataType().ID())
+}
+
+func (s *MapOpTestSuite) TestMapOpReleasesPartialOutputOnFunctionError() {
+	df := s.createTestDF([]int64{1}, []float32{1}, []int64{1})
+	defer df.Release()
+	fn := &mapContractExpr{kind: "partial_error", declared: []arrow.DataType{arrow.BinaryTypes.String}}
+	op, err := NewMapOp(fn, []string{types.ScoreFieldName}, []string{"out"})
+	s.Require().NoError(err)
+	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
+	_, err = op.Execute(ctx, df)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "partial output error")
+}
+
+func (s *MapOpTestSuite) TestMapOpPreservesGlobalMetadata() {
+	df := s.createTestDF([]int64{1}, []float32{1}, []int64{1})
+	defer df.Release()
+	df.metadata[types.MetadataKeyMetricType] = "COSINE"
+	df.metadata["custom"] = "value"
+	op, err := NewMapOp(&doubleScoreExpr{}, []string{types.ScoreFieldName}, []string{"doubled"})
+	s.Require().NoError(err)
+	ctx := types.NewFuncContextFull(context.TODO(), s.pool, "rerank")
+	result, err := op.Execute(ctx, df)
+	s.Require().NoError(err)
+	defer result.Release()
+	metricType, ok := result.MetricType()
+	s.True(ok)
+	s.Equal("COSINE", metricType)
+	custom, ok := result.Metadata("custom")
+	s.True(ok)
+	s.Equal("value", custom)
 }
 
 func (s *MapOpTestSuite) TestMapOpString() {

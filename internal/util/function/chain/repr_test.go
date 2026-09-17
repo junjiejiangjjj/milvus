@@ -463,6 +463,7 @@ func TestIsFunctionChainSystemName(t *testing.T) {
 	assert.True(t, IsFunctionChainSystemName("$unknown"))
 	assert.False(t, IsFunctionChainSystemName("$meta"))
 	assert.False(t, IsFunctionChainSystemName(`$meta["value"]`))
+	assert.True(t, IsFunctionChainSystemName(types.HighlightFieldName))
 	assert.False(t, IsFunctionChainSystemName("score"))
 	assert.False(t, IsFunctionChainSystemName(""))
 }

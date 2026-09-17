@@ -1975,7 +1975,7 @@ func (s *RerankBuilderTestSuite) TestBuildWeightedChain_MixedMetrics_SortDirecti
 
 	// Sort operator should be descending (mixed → direction conversion → larger-is-better)
 	sortOp := fc.operators[1].(*SortOp)
-	s.True(sortOp.desc)
+	s.True(sortOp.Keys()[0].Descending)
 }
 
 func (s *RerankBuilderTestSuite) TestBuildWeightedChain_AllL2_SortAscending() {
@@ -2000,7 +2000,7 @@ func (s *RerankBuilderTestSuite) TestBuildWeightedChain_AllL2_SortAscending() {
 
 	// Sort should be ascending for all-L2 no-normalize (smaller distance = better)
 	sortOp := fc.operators[1].(*SortOp)
-	s.False(sortOp.desc)
+	s.False(sortOp.Keys()[0].Descending)
 }
 
 func (s *RerankBuilderTestSuite) TestBuildWeightedChain_Normalize_AlwaysDescending() {
@@ -2025,7 +2025,7 @@ func (s *RerankBuilderTestSuite) TestBuildWeightedChain_Normalize_AlwaysDescendi
 	s.Require().NoError(err)
 
 	sortOp := fc.operators[1].(*SortOp)
-	s.True(sortOp.desc)
+	s.True(sortOp.Keys()[0].Descending)
 }
 
 func (s *RerankBuilderTestSuite) TestExecuteRerankChain_Weighted_MixedMetrics_NoNormalize() {

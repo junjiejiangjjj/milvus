@@ -129,6 +129,7 @@ const (
 	lambdaOp              = "lambda"
 	highlightOp           = "highlight"
 	orderByOp             = "order_by"
+	postProcessOp         = "post_process"
 )
 
 const (
@@ -150,6 +151,7 @@ var opFactory = map[string]func(t *searchTask, params map[string]any) (operator,
 	endOp:                 newEndOperator,
 	highlightOp:           newHighlightOperator,
 	orderByOp:             newOrderByOperator,
+	postProcessOp:         newPostProcessOperator,
 }
 
 func NewNode(info *nodeDef, t *searchTask) (*Node, error) {
@@ -1245,6 +1247,9 @@ func newRequeryOperator(t *searchTask, _ map[string]any) (operator, error) {
 	outputFieldNames := typeutil.NewSet(t.translatedOutputFields...)
 	if t.GetIsAdvanced() && t.rerankMeta != nil {
 		outputFieldNames.Insert(t.rerankMeta.GetInputFieldNames()...)
+	}
+	if t.postProcessPlan != nil {
+		outputFieldNames.Insert(t.postProcessPlan.GetInputFieldNames()...)
 	}
 	// Union order_by field names with output fields for requery
 	// Use OutputFieldName which is the proper name for requery:
@@ -3008,6 +3013,10 @@ var endNode = &nodeDef{
 	opName:  endOp,
 }
 
+var postProcessNode = &nodeDef{
+	name: "post_process", inputs: []string{"result"}, outputs: []string{"result"}, opName: postProcessOp,
+}
+
 var highlightNode = &nodeDef{
 	name:    "highlight",
 	inputs:  []string{"result"},
@@ -3561,7 +3570,11 @@ func newSearchPipeline(t *searchTask) (*pipeline, error) {
 		return p, nil
 	}
 
-	if t.highlighter != nil {
+	if t.postProcessPlan != nil {
+		if err := p.AddNodes(t, postProcessNode, endNode); err != nil {
+			return nil, err
+		}
+	} else if t.highlighter != nil {
 		err := p.AddNodes(t, highlightNode, endNode)
 		if err != nil {
 			return nil, err

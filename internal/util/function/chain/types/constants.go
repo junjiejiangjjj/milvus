@@ -76,6 +76,7 @@ const (
 	ScoreFieldName     = "$score"
 	SegOffsetFieldName = "$seg_offset"
 	GroupByFieldName   = "$group_by"
+	HighlightFieldName = "$highlight"
 	// ElementIndicesFieldName stores one Int32 element index per result row.
 	ElementIndicesFieldName = "$element_indices"
 )

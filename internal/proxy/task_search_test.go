@@ -763,6 +763,14 @@ func TestSearchTask_NamespacePartitionModeSkipsRequery(t *testing.T) {
 		err := task.initAdvancedSearchRequest(ctx)
 		require.NoError(t, err)
 		require.False(t, task.needRequery)
+
+		task.request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		err = task.initAdvancedSearchRequest(ctx)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "post process is not supported for hybrid search yet")
 	})
 }
 
@@ -5619,6 +5627,99 @@ func TestSearchTask_L2DynamicInputProjection(t *testing.T) {
 	}
 }
 
+func TestSearchTask_PostProcessDynamicInputProjection(t *testing.T) {
+	paramtable.Init()
+	policy := &paramtable.Get().CommonCfg.SearchRequeryPolicy
+	originalPolicy := policy.GetValue()
+	require.NoError(t, paramtable.Get().Save(policy.Key, "outputvector"))
+	t.Cleanup(func() { paramtable.Get().Save(policy.Key, originalPolicy) })
+
+	schema := proto.Clone(newFunctionChainJSONTestSchema().CollectionSchema).(*schemapb.CollectionSchema)
+	schema.Fields = append(schema.Fields, &schemapb.FieldSchema{
+		FieldID: 104, Name: "vec", DataType: schemapb.DataType_FloatVector,
+		TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "2"}},
+	})
+	schemaInfo := mustNewSchemaInfo(schema)
+
+	for _, tc := range []struct {
+		name            string
+		outputs         []string
+		paths           []string
+		rerankPath      string
+		expected        []string
+		expectedRequery bool
+	}{
+		{name: "combined L2 and post-process inputs", outputs: []string{"title"}, paths: []string{`$meta["rank"]`}, rerankPath: `$meta["boost"]`, expected: []string{"title", "boost", "rank"}},
+		{name: "hidden top-level input", outputs: []string{"title"}, paths: []string{`$meta["rank"]`}, expected: []string{"title", "rank"}},
+		{name: "hidden nested input", outputs: []string{"title"}, paths: []string{`$meta["profile"]["rank"]`}, expected: []string{"title", "profile"}},
+		{name: "shared root and ordinary JSON", outputs: []string{"title"}, paths: []string{`$meta["profile"]["rank"]`, `$meta["profile"]["bonus"]`, `metadata["value"]`}, expected: []string{"title", "profile"}},
+		{name: "input already requested", outputs: []string{"rank"}, paths: []string{`$meta["rank"]`}, expected: []string{"rank"}},
+		{name: "no dynamic output", outputs: []string{"pk"}, paths: []string{`$meta["rank"]`}},
+		{name: "complete dynamic root", outputs: []string{common.MetaFieldName}, paths: []string{`$meta["rank"]`}},
+		{name: "ordinary JSON input", outputs: []string{"title"}, paths: []string{`metadata["rank"]`}, expected: []string{"title"}},
+		{name: "requery fetches complete root", outputs: []string{"title", "vec"}, paths: []string{`$meta["rank"]`}, expectedRequery: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ops []*schemapb.FunctionChainOp
+			for _, path := range tc.paths {
+				op := postProcessRoundDecimalMapOp("temporary", path)
+				op.Params = map[string]*schemapb.FunctionParamValue{
+					"$input_data_types": chainDataTypesParam(schemapb.DataType_Int64),
+				}
+				ops = append(ops, op)
+			}
+			translated, userOutputs, dynamicFields, _, _, err := translateOutputFields(tc.outputs, schemaInfo, true)
+			require.NoError(t, err)
+			outputIDs, err := getOutputFieldIDs(schemaInfo, translated)
+			require.NoError(t, err)
+			task := &searchTask{
+				ctx:           context.Background(),
+				SearchRequest: &internalpb.SearchRequest{Base: &commonpb.MsgBase{}, OutputFieldsId: outputIDs},
+				request: &milvuspb.SearchRequest{
+					OutputFields:   tc.outputs,
+					FunctionChains: []*schemapb.FunctionChain{postProcessFunctionChain(ops...)},
+					SearchParams: []*commonpb.KeyValuePair{
+						{Key: AnnsFieldKey, Value: "vec"},
+						{Key: TopKKey, Value: "3"},
+						{Key: common.MetricTypeKey, Value: metric.L2},
+					},
+				},
+				schema:                 schemaInfo,
+				translatedOutputFields: translated,
+				userOutputFields:       userOutputs,
+				userDynamicFields:      dynamicFields,
+				tr:                     timerecord.NewTimeRecorder("test"),
+				queryInfos:             []*planpb.QueryInfo{{}},
+			}
+			if tc.rerankPath != "" {
+				op := mapOp(chaintypes.ScoreFieldName, "expr", columnArg(tc.rerankPath))
+				op.Params = map[string]*schemapb.FunctionParamValue{
+					chaintypes.InputDataTypesParam: chainDataTypesParam(schemapb.DataType_Int64),
+				}
+				task.request.FunctionChains = append(task.request.FunctionChains, l2FunctionChain(op))
+			}
+			originalDynamicFields := append([]string(nil), dynamicFields...)
+			originalUserOutputs := append([]string(nil), userOutputs...)
+			require.NoError(t, task.initSearchRequest(task.ctx))
+			require.NotNil(t, task.postProcessPlan)
+			require.NotNil(t, task.postProcessPlan.GetInputPlan())
+			assert.Equal(t, tc.expectedRequery, task.needRequery)
+			plan := &planpb.PlanNode{}
+			require.NoError(t, proto.Unmarshal(task.SerializedExprPlan, plan))
+			assert.ElementsMatch(t, tc.expected, plan.GetDynamicFields())
+			if tc.expectedRequery {
+				requery, err := newRequeryOperator(task, nil)
+				require.NoError(t, err)
+				assert.Contains(t, requery.(*requeryOperator).outputFieldNames, common.MetaFieldName)
+			} else {
+				assert.Contains(t, plan.GetOutputFieldIds(), int64(103))
+			}
+			assert.ElementsMatch(t, originalDynamicFields, task.userDynamicFields)
+			assert.ElementsMatch(t, originalUserOutputs, task.userOutputFields)
+		})
+	}
+}
+
 func TestSearchTask_FunctionChainRerankMeta(t *testing.T) {
 	paramtable.Init()
 	ctx := context.Background()
@@ -5628,6 +5729,7 @@ func TestSearchTask_FunctionChainRerankMeta(t *testing.T) {
 			{FieldID: 100, Name: "pk", DataType: schemapb.DataType_Int64, IsPrimaryKey: true},
 			{FieldID: 101, Name: "ts", DataType: schemapb.DataType_Int64},
 			{FieldID: 102, Name: "vec", DataType: schemapb.DataType_FloatVector, TypeParams: []*commonpb.KeyValuePair{{Key: common.DimKey, Value: "128"}}},
+			{FieldID: 103, Name: "content", DataType: schemapb.DataType_Text},
 		},
 	}
 	schemaInfo := mustNewSchemaInfo(schema)
@@ -5739,6 +5841,195 @@ func TestSearchTask_FunctionChainRerankMeta(t *testing.T) {
 		assert.Equal(t, []int64{101}, meta.GetInputFieldIDs())
 	})
 
+	t.Run("ordinary search keeps legacy order-by out of post-process plan", func(t *testing.T) {
+		request := newRequest()
+		request.SearchParams = append(request.SearchParams, &commonpb.KeyValuePair{Key: OrderByFieldsKey, Value: "ts:asc"})
+		task := newTask(request)
+
+		require.NoError(t, task.initSearchRequest(ctx))
+		assert.Nil(t, task.postProcessPlan)
+	})
+
+	t.Run("ordinary search accepts explicit post-process", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, task.postProcessPlan)
+		assert.Same(t, request.FunctionChains[0], task.postProcessPlan.Chain)
+		assert.NotNil(t, task.postProcessPlan.ChainRepr)
+		assert.Empty(t, task.postProcessPlan.GetInputFieldNames())
+		assert.Empty(t, task.postProcessPlan.GetInputFieldIDs())
+	})
+
+	t.Run("ordinary search plans explicit post-process schema dependency", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("temporary", "ts")),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, task.postProcessPlan)
+		assert.Equal(t, []string{"ts"}, task.postProcessPlan.GetInputFieldNames())
+		assert.Equal(t, []int64{101}, task.postProcessPlan.GetInputFieldIDs())
+		assert.False(t, task.needRequery)
+
+		plan := &planpb.PlanNode{}
+		require.NoError(t, proto.Unmarshal(task.GetSerializedExprPlan(), plan))
+		assert.Contains(t, plan.GetOutputFieldIds(), int64(101))
+	})
+
+	t.Run("ordinary search adds post-process scalar dependency to requery", func(t *testing.T) {
+		Params.Save(Params.CommonCfg.SearchRequeryPolicy.Key, "Always")
+		defer Params.Save(Params.CommonCfg.SearchRequeryPolicy.Key, "OutputVector")
+
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("temporary", "ts")),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.NoError(t, err)
+		assert.True(t, task.needRequery)
+
+		plan := &planpb.PlanNode{}
+		require.NoError(t, proto.Unmarshal(task.GetSerializedExprPlan(), plan))
+		assert.NotContains(t, plan.GetOutputFieldIds(), int64(101))
+	})
+
+	t.Run("ordinary search post-process Text dependency forces requery", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(&schemapb.FunctionChainOp{Op: chaintypes.OpTypeSort, Inputs: []string{"content"}}),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.NoError(t, err)
+		require.NotNil(t, task.postProcessPlan)
+		assert.Equal(t, []string{"content"}, task.postProcessPlan.GetInputFieldNames())
+		assert.True(t, task.needRequery)
+	})
+
+	t.Run("ordinary search rejects post-process dynamic input when dynamic field is disabled", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("temporary", `$meta["age"]`)),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.Contains(t, err.Error(), "cannot parse identifier")
+		assert.Nil(t, task.postProcessPlan)
+	})
+
+	t.Run("ordinary search rejects explicit post-process with order by", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		request.SearchParams = append(request.SearchParams, &commonpb.KeyValuePair{Key: OrderByFieldsKey, Value: "ts:asc"})
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain and order_by_fields")
+	})
+
+	t.Run("ordinary search rejects explicit post-process with highlighter", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(postProcessRoundDecimalMapOp("display_score", chaintypes.ScoreFieldName)),
+		}
+		request.Highlighter = &commonpb.Highlighter{Type: commonpb.HighlightType_Lexical}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "post-process function chain and highlighter")
+	})
+
+	t.Run("ordinary search rejects aggregation with legacy order by", func(t *testing.T) {
+		request := newRequest()
+		request.SearchParams = append(request.SearchParams, &commonpb.KeyValuePair{Key: OrderByFieldsKey, Value: "ts:asc"})
+		task := newTask(request)
+		task.aggCtx = &search_agg.SearchAggregationContext{}
+
+		err := task.initSearchRequest(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "order_by_fields is not supported with search_aggregation")
+	})
+
+	t.Run("search iterator rejects explicit post-process sort", func(t *testing.T) {
+		request := withSearchIteratorV1(newRequest())
+		request.FunctionChains = []*schemapb.FunctionChain{
+			postProcessFunctionChain(&schemapb.FunctionChainOp{Op: chaintypes.OpTypeSort, Inputs: []string{chaintypes.ScoreFieldName}}),
+		}
+		task := newTask(request)
+
+		err := task.initSearchRequest(ctx)
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.ErrorContains(t, err, "post-process is not supported with search iterator")
+		require.NotNil(t, task.postProcessPlan)
+		assert.Equal(t, chaintypes.OpTypeSort, task.postProcessPlan.ChainRepr.Operators[0].Type)
+	})
+
+	for _, tc := range []struct {
+		name    string
+		modify  func(*milvuspb.SearchRequest)
+		message string
+	}{
+		{"iterator v2", func(r *milvuspb.SearchRequest) { withSearchIteratorV2(r) }, "search iterator"},
+		{"group-by singular", func(r *milvuspb.SearchRequest) {
+			r.SearchParams = append(r.SearchParams, &commonpb.KeyValuePair{Key: GroupByFieldKey, Value: "ts"})
+		}, "search group-by"},
+		{"group-by plural", func(r *milvuspb.SearchRequest) {
+			r.SearchParams = append(r.SearchParams, &commonpb.KeyValuePair{Key: GroupByFieldsKey, Value: "ts"})
+		}, "search group-by"},
+	} {
+		t.Run("post-process rejects "+tc.name, func(t *testing.T) {
+			request := newRequest()
+			request.FunctionChains = []*schemapb.FunctionChain{postProcessFunctionChain(postProcessTestLimit(2, 0))}
+			tc.modify(request)
+			err := newTask(request).initSearchRequest(ctx)
+			require.ErrorIs(t, err, merr.ErrParameterInvalid)
+			assert.ErrorContains(t, err, tc.message)
+			assert.False(t, merr.Status(err).GetRetriable())
+		})
+	}
+	t.Run("post-process rejects ArrayOfVector", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{postProcessFunctionChain(postProcessTestLimit(2, 0))}
+		task := newTask(request)
+		schemaCopy := proto.Clone(schema).(*schemapb.CollectionSchema)
+		schemaCopy.Fields[2].DataType = schemapb.DataType_ArrayOfVector
+		schemaCopy.Fields[2].ElementType = schemapb.DataType_FloatVector
+		task.schema = mustNewSchemaInfo(schemaCopy)
+		err := task.initSearchRequest(ctx)
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.ErrorContains(t, err, "ArrayOfVector")
+	})
+	t.Run("post-process rejects TEXT dependency when namespace mode skips requery", func(t *testing.T) {
+		request := newRequest()
+		request.FunctionChains = []*schemapb.FunctionChain{postProcessFunctionChain(postProcessTestSort("content", schemapb.DataType_None))}
+		task := newTask(request)
+		schemaCopy := proto.Clone(schema).(*schemapb.CollectionSchema)
+		schemaCopy.EnableNamespace = true
+		schemaCopy.Properties = []*commonpb.KeyValuePair{{Key: common.NamespaceModeKey, Value: common.NamespaceModePartition}}
+		task.schema = mustNewSchemaInfo(schemaCopy)
+		err := task.initSearchRequest(ctx)
+		require.ErrorIs(t, err, merr.ErrParameterInvalid)
+		assert.ErrorContains(t, err, "TEXT inputs require requery")
+	})
 	t.Run("ordinary search with function chains keeps default search type", func(t *testing.T) {
 		task := newTask(newFunctionChainRequest())
 
