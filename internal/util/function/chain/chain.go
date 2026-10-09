@@ -208,6 +208,10 @@ func (fc *FuncChain) ExecuteWithOptions(ctx context.Context, opts ExecuteOptions
 			if err != nil {
 				return nil, merr.Wrapf(err, "%s failed", mergeOp.Name())
 			}
+			if err := result.ValidateShape(); err != nil {
+				fc.releaseIfOwned(result, inputs)
+				return nil, merr.Wrapf(err, "%s produced invalid DataFrame shape", mergeOp.Name())
+			}
 			startIdx = 1
 			if plan != nil {
 				result, err = fc.pruneIfNeeded(result, plan.PruneAfter[0], plan.SystemColumnPolicy, inputs)
@@ -220,11 +224,17 @@ func (fc *FuncChain) ExecuteWithOptions(ctx context.Context, opts ExecuteOptions
 			if len(inputs) > 1 {
 				return nil, merr.WrapErrParameterInvalidMsg("chain expects 1 input but got %d (first operator is not MergeOp)", len(inputs))
 			}
+			if err := inputs[0].ValidateShape(); err != nil {
+				return nil, merr.Wrap(err, "function chain input[0] has invalid shape")
+			}
 			result = inputs[0]
 		}
 	} else {
 		if len(inputs) > 1 {
 			return nil, merr.WrapErrParameterInvalidMsg("chain expects 1 input but got %d (chain has no operators)", len(inputs))
+		}
+		if err := inputs[0].ValidateShape(); err != nil {
+			return nil, merr.Wrap(err, "function chain input[0] has invalid shape")
 		}
 		result = inputs[0]
 	}
@@ -254,6 +264,13 @@ func (fc *FuncChain) ExecuteWithOptions(ctx context.Context, opts ExecuteOptions
 		if err != nil {
 			fc.releaseIfOwned(result, inputs)
 			return nil, merr.Wrapf(err, "%s failed", op.Name())
+		}
+		if err := newResult.ValidateShape(); err != nil {
+			if newResult != result {
+				fc.releaseIfOwned(newResult, inputs)
+			}
+			fc.releaseIfOwned(result, inputs)
+			return nil, merr.Wrapf(err, "operator[%d] %s produced invalid DataFrame shape", i, op.Name())
 		}
 
 		// Release intermediate results (but not the original inputs)

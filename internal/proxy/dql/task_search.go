@@ -30,6 +30,7 @@ import (
 	"github.com/milvus-io/milvus/internal/proxy/taskmodel"
 	"github.com/milvus-io/milvus/internal/types"
 	"github.com/milvus-io/milvus/internal/util/exprutil"
+	"github.com/milvus-io/milvus/internal/util/function/chain"
 	"github.com/milvus-io/milvus/internal/util/function/embedding"
 	"github.com/milvus-io/milvus/internal/util/function/models"
 	"github.com/milvus-io/milvus/internal/util/rlsutil"
@@ -115,6 +116,10 @@ type SearchTask struct {
 
 	// Order by fields for sorting results
 	orderByFields []OrderByField
+
+	// Explicit post-process plan. Legacy order-by and highlighter requests keep
+	// using their existing pipelines and leave this field nil.
+	postProcessPlan *PostProcessPlan
 
 	resolvedTimezoneStr string
 
@@ -621,6 +626,9 @@ func (t *SearchTask) initAdvancedSearchRequest(ctx context.Context) error {
 	// pre-materialization occurrence/decoded-memory budget across all of them;
 	// the serialized-plan gate below also shares one filterPlanSize budget.
 	membershipPreflightBudget := planparserv2.NewMembershipPreflightBudget()
+	if hasFunctionChainStage(t.request.GetFunctionChains(), schemapb.FunctionChainStage_FunctionChainStagePostProcess) {
+		return merr.WrapErrParameterInvalidMsg("post process is not supported for hybrid search yet")
+	}
 	t.rerankMeta, err = selectHybridRerankMeta(t.request, t.schema)
 	if err != nil {
 		return err
@@ -674,11 +682,11 @@ func (t *SearchTask) initAdvancedSearchRequest(ctx context.Context) error {
 	t.hybridElementLevel = false
 	queryFieldIDs := []int64{}
 	for index, subReq := range t.request.GetSubReqs() {
-		l2Chains, querynodeFunctionChains, err := splitFunctionChainsByStage(subReq.GetFunctionChains())
+		l2Chains, querynodeFunctionChains, postProcessChains, err := splitFunctionChainsByStage(subReq.GetFunctionChains())
 		if err != nil {
 			return merr.Wrapf(err, "sub-search[%d] function chains", index)
 		}
-		if len(l2Chains) > 0 {
+		if len(l2Chains) > 0 || len(postProcessChains) > 0 {
 			return merr.WrapErrParameterInvalidMsg(
 				"sub-search[%d] function chains only support L0 and L1 stages", index)
 		}
@@ -822,7 +830,7 @@ func (t *SearchTask) initAdvancedSearchRequest(ctx context.Context) error {
 			plan.OutputFieldIds = allFieldIDs.Collect()
 			plan.DynamicFields = t.userDynamicFields
 		}
-		t.retainRerankDynamicFields(plan)
+		t.retainFunctionChainDynamicFields(plan)
 		plan.Namespace = NamespaceForPlan(t.schema.CollectionSchema, t.request.Namespace)
 		plan.QuerynodeFunctionChains = querynodeFunctionChains
 
@@ -1034,29 +1042,59 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 	if err := validateFunctionChainSearchRequest(t.request, false); err != nil {
 		return err
 	}
-	var querynodeFunctionChains []*schemapb.FunctionChain
+	var l2Chains, querynodeFunctionChains, postProcessChains []*schemapb.FunctionChain
 	if len(t.request.GetFunctionChains()) > 0 {
-		l2Chains, qnChains, err := splitFunctionChainsByStage(t.request.GetFunctionChains())
+		l2Chains, querynodeFunctionChains, postProcessChains, err = splitFunctionChainsByStage(t.request.GetFunctionChains())
 		if err != nil {
 			return err
 		}
-		if len(l2Chains) > 0 {
-			meta, err := newFunctionChainRerankMeta(l2Chains, t.schema)
-			if err != nil {
-				return err
-			}
-			t.rerankMeta = meta
-		}
-		querynodeFunctionChains = qnChains
+	}
+	if err := validatePostProcessCompatibility(
+		postProcessChains,
+		len(t.orderByFields) > 0,
+		t.request.GetHighlighter() != nil,
+		t.aggCtx != nil,
+	); err != nil {
+		return err
+	}
 
-		if hasFunctionChainStage(qnChains, schemapb.FunctionChainStage_FunctionChainStageL1Rerank) && t.aggCtx != nil {
-			return merr.WrapErrParameterInvalidMsg("L1 function chain is not supported with search_aggregation")
+	var postProcessChain *schemapb.FunctionChain
+	if len(postProcessChains) == 1 {
+		postProcessChain = postProcessChains[0]
+	}
+	postProcessPlan, err := buildPostProcessPlan(postProcessChain, t.schema)
+	if err != nil {
+		return err
+	}
+	t.postProcessPlan = postProcessPlan
+
+	if postProcessPlan != nil {
+		annsField := typeutil.GetField(t.schema.CollectionSchema, queryInfo.GetQueryFieldId())
+		if err := validatePostProcessSearchMode(isIterator,
+			queryInfo.GetGroupByFieldId() > 0 || len(queryInfo.GetGroupByFieldIds()) > 0 || len(t.GetGroupByFieldIds()) > 0,
+			annsField != nil && typeutil.IsArrayOfVectorType(annsField.GetDataType())); err != nil {
+			return err
 		}
+		// PostProcess needs the full candidate/result-field path, including
+		// hidden inputs; exclude optimized search modes for its first release.
+		t.SearchType = internalpb.SearchType_DEFAULT
+	}
+
+	if len(l2Chains) > 0 {
+		meta, err := newFunctionChainRerankMeta(l2Chains, t.schema)
+		if err != nil {
+			return err
+		}
+		t.rerankMeta = meta
 	} else if t.request.FunctionScore != nil {
 		t.rerankMeta, err = newRerankMeta(t.schema.CollectionSchema, t.request.FunctionScore)
 		if err != nil {
 			return err
 		}
+	}
+
+	if hasFunctionChainStage(querynodeFunctionChains, schemapb.FunctionChainStage_FunctionChainStageL1Rerank) && t.aggCtx != nil {
+		return merr.WrapErrParameterInvalidMsg("L1 function chain is not supported with search_aggregation")
 	}
 
 	// Search iterators use the final result score to derive the ANN continuation
@@ -1119,12 +1157,19 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 		t.needRequery = false
 	} else {
 		allFields := typeutil.GetAllFieldSchemas(t.schema.CollectionSchema)
+		var postProcessInputFieldNames []string
+		if t.postProcessPlan != nil {
+			postProcessInputFieldNames = t.postProcessPlan.GetInputFieldNames()
+		}
 		vectorOutputFields := lo.Filter(allFields, func(field *schemapb.FieldSchema, _ int) bool {
 			return lo.Contains(t.translatedOutputFields, field.GetName()) && typeutil.IsVectorType(field.GetDataType())
 		})
 		// TEXT type output fields need requery since TEXT data is stored as LOB references
 		textOutputFields := lo.Filter(allFields, func(field *schemapb.FieldSchema, _ int) bool {
 			return lo.Contains(t.translatedOutputFields, field.GetName()) && typeutil.IsTextType(field.GetDataType())
+		})
+		postProcessTextInputFields := lo.Filter(allFields, func(field *schemapb.FieldSchema, _ int) bool {
+			return lo.Contains(postProcessInputFieldNames, field.GetName()) && typeutil.IsTextType(field.GetDataType())
 		})
 		switch strings.ToLower(paramtable.Get().CommonCfg.SearchRequeryPolicy.GetValue()) {
 		case "always":
@@ -1136,6 +1181,10 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 		default:
 			t.needRequery = len(vectorOutputFields) > 0 || len(textOutputFields) > 0
 		}
+		if len(postProcessTextInputFields) > 0 && t.skipRequeryByNamespacePartitionMode() {
+			return merr.WrapErrParameterInvalidMsg("post-process TEXT inputs require requery, which is unavailable in namespace partition mode")
+		}
+		t.needRequery = t.needRequery || len(postProcessTextInputFields) > 0
 	}
 	if t.skipRequeryByNamespacePartitionMode() {
 		t.needRequery = false
@@ -1143,6 +1192,10 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 	var rerankInputFieldIDs []int64
 	if t.rerankMeta != nil {
 		rerankInputFieldIDs = t.rerankMeta.GetInputFieldIDs()
+	}
+	var postProcessInputFieldIDs []int64
+	if t.postProcessPlan != nil {
+		postProcessInputFieldIDs = t.postProcessPlan.GetInputFieldIDs()
 	}
 	if t.needRequery {
 		plan.OutputFieldIds = rerankInputFieldIDs
@@ -1153,6 +1206,7 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 		}
 		allFieldIDs := typeutil.NewSet[int64](t.OutputFieldsId...)
 		allFieldIDs.Insert(rerankInputFieldIDs...)
+		allFieldIDs.Insert(postProcessInputFieldIDs...)
 		allFieldIDs.Insert(primaryFieldSchema.FieldID)
 		plan.OutputFieldIds = allFieldIDs.Collect()
 		plan.DynamicFields = t.userDynamicFields
@@ -1166,7 +1220,7 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 			}
 		}
 	}
-	t.retainRerankDynamicFields(plan)
+	t.retainFunctionChainDynamicFields(plan)
 	plan.Namespace = NamespaceForPlan(t.schema.CollectionSchema, t.request.Namespace)
 	plan.QuerynodeFunctionChains = querynodeFunctionChains
 
@@ -1277,21 +1331,29 @@ func (t *SearchTask) initSearchRequest(ctx context.Context) error {
 	return nil
 }
 
-// retainRerankDynamicFields keeps hidden L2 inputs in the materialized dynamic
-// root for ordinary Search and each Hybrid sub-search. Empty DynamicFields
-// already fetches the whole root; userOutputFields still owns client projection.
-func (t *SearchTask) retainRerankDynamicFields(plan *planpb.PlanNode) {
-	if len(plan.DynamicFields) == 0 || t.rerankMeta == nil {
+// retainFunctionChainDynamicFields keeps hidden chain inputs in the materialized
+// dynamic root. Empty DynamicFields already fetches the whole root;
+// userOutputFields still owns client projection.
+func (t *SearchTask) retainFunctionChainDynamicFields(plan *planpb.PlanNode) {
+	if len(plan.DynamicFields) == 0 {
 		return
 	}
-	inputPlan := t.rerankMeta.GetInputPlan()
-	if inputPlan == nil {
-		return
+	var inputPlans []*chain.DataFrameInputPlan
+	if t.rerankMeta != nil {
+		inputPlans = append(inputPlans, t.rerankMeta.GetInputPlan())
+	}
+	if t.postProcessPlan != nil && !t.needRequery {
+		inputPlans = append(inputPlans, t.postProcessPlan.GetInputPlan())
 	}
 	fields := typeutil.NewSet[string](plan.DynamicFields...)
-	for _, input := range inputPlan.Inputs {
-		if input.FieldName == common.MetaFieldName && len(input.NestedPath) > 0 {
-			fields.Insert(input.NestedPath[0])
+	for _, inputPlan := range inputPlans {
+		if inputPlan == nil {
+			continue
+		}
+		for _, input := range inputPlan.Inputs {
+			if input.FieldName == common.MetaFieldName && len(input.NestedPath) > 0 {
+				fields.Insert(input.NestedPath[0])
+			}
 		}
 	}
 	plan.DynamicFields = fields.Collect()
