@@ -51,7 +51,8 @@ func (s *grepSegment) ScanGrep(ctx context.Context, offsets *array.Int64, req na
 	}
 	c, e := req.CompileLimits, req.ExecutionLimits
 	if req.Limit <= 0 || c.MaxRegexBytes == 0 || c.MaxDFACacheBytes == 0 ||
-		e.BatchSize <= 0 || e.MaxResultBytes == 0 {
+		e.BatchSize <= 0 || e.MaxResultBytes == 0 ||
+		math.IsNaN(e.ProbeMatchRatio) || math.IsInf(e.ProbeMatchRatio, 0) || e.ProbeMatchRatio < 0 || e.ProbeMatchRatio > 1 {
 		return nil, merr.WrapErrServiceInternalMsg("invalid prepared grep budgets, limit or offsets")
 	}
 	if offsets.NullN() != 0 {
@@ -72,7 +73,12 @@ func (s *grepSegment) ScanGrep(ctx context.Context, offsets *array.Int64, req na
 		field_id: C.int64_t(req.FieldID), limit: C.int64_t(req.Limit), batch_size: C.int64_t(e.BatchSize),
 		pattern_kind: C.uint32_t(req.Spec.PatternKind()), case_mode: C.uint32_t(req.Spec.CaseMode()), boundary: C.uint32_t(req.Spec.Boundary()),
 		max_regex_bytes: C.uint64_t(c.MaxRegexBytes), max_dfa_cache_bytes: C.uint64_t(c.MaxDFACacheBytes),
-		max_result_bytes: C.uint64_t(e.MaxResultBytes),
+		max_result_bytes:  C.uint64_t(e.MaxResultBytes),
+		probe_match_ratio: C.double(e.ProbeMatchRatio),
+	}
+	if count, present := req.Spec.MaxCount(); present {
+		options.has_max_count = 1
+		options.max_count = C.uint64_t(count)
 	}
 	var patterns *C.uint8_t
 	if len(blob) > 0 {

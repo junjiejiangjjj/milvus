@@ -69,7 +69,7 @@ func grepTestBinding(runner grepTestRunner) grepBinding {
 }
 
 func grepTestLimits() native.ExecutionLimits {
-	return native.ExecutionLimits{BatchSize: 128, MaxResultBytes: uint64(paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64())}
+	return native.ExecutionLimits{BatchSize: 128, ProbeMatchRatio: 0.05, MaxResultBytes: uint64(paramtable.Get().QuotaConfig.MaxOutputSize.GetAsInt64())}
 }
 
 func (b grepBinding) execution(ctx context.Context, pool memory.Allocator) *types.FuncContext {
@@ -439,6 +439,10 @@ func TestGrepRequiresSegmentAndExecutionBudgets(t *testing.T) {
 }
 
 func TestGrepExecutionConfigurationSnapshot(t *testing.T) {
+	ratio := &paramtable.Get().FunctionCfg.GrepProbeMatchRatio
+	previousRatio := ratio.GetValue()
+	defer paramtable.Get().Save(ratio.Key, previousRatio)
+	require.NoError(t, paramtable.Get().Save(ratio.Key, "0.1"))
 	item := &paramtable.Get().FunctionCfg.GrepBatchSize
 	previous := item.GetValue()
 	defer paramtable.Get().Save(item.Key, previous)
@@ -468,6 +472,7 @@ func TestGrepExecutionConfigurationSnapshot(t *testing.T) {
 	op, err := NewGrepOpFromReprWithContext(grepTestRepr(t), binding.Build)
 	require.NoError(t, err)
 	binding.Build.QueryScan.FieldID = 999
+	require.NoError(t, paramtable.Get().Save(ratio.Key, "0.2"))
 	require.NoError(t, paramtable.Get().Save(regexItem.Key, "16384"))
 	require.NoError(t, paramtable.Get().Save(cacheItem.Key, "32768"))
 	require.NoError(t, paramtable.Get().Save(item.Key, "11"))
@@ -483,6 +488,7 @@ func TestGrepExecutionConfigurationSnapshot(t *testing.T) {
 	require.Equal(t, native.CompileLimits{MaxRegexBytes: 4096, MaxDFACacheBytes: 8192}, req.CompileLimits)
 	require.Equal(t, int64(1), req.Limit)
 	require.Equal(t, int64(11), paramtable.Get().FunctionCfg.GrepBatchSize.GetAsInt64())
+	require.Equal(t, 0.1, req.ExecutionLimits.ProbeMatchRatio)
 }
 
 func TestGrepArgumentSizeConfiguration(t *testing.T) {

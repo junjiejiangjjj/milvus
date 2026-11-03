@@ -204,6 +204,30 @@ NgramIndexReader::CellByteSize() const {
 }
 
 bool
+NgramIndexReader::CanHandleConditionTree(
+    const RegexLiteralCondition& condition) const {
+    return !PlanNgramRegexCondition(condition, min_gram_).IsTrue();
+}
+
+void
+NgramIndexReader::ConditionTreeCandidates(
+    const RegexLiteralCondition& condition, TargetBitmap& candidates) const {
+    AssertInfo(candidates.size() == count_,
+               "NGRAM candidates size {} disagrees with count {}",
+               candidates.size(),
+               count_);
+    const auto plan = PlanNgramRegexCondition(condition, min_gram_);
+    AssertInfo(!plan.IsTrue(),
+               "NGRAM cannot handle the requested condition tree");
+    ApplyNgramRegexPlan(
+        plan,
+        candidates,
+        [this](const std::vector<std::string>& literals, TargetBitmap& bitmap) {
+            ApplyLiterals(literals, bitmap);
+        });
+}
+
+bool
 NgramIndexReader::CanHandle(std::string_view literal, PatternOp op) const {
     const auto owned = OwnString(literal);
     switch (op) {

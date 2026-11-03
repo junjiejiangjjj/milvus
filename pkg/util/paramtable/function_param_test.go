@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFunctionConfig(t *testing.T) {
@@ -156,5 +157,20 @@ func TestGrepConfigValidationAndRefresh(t *testing.T) {
 				assert.Equal(t, value, tc.item.GetAsInt64())
 			}
 		})
+	}
+}
+
+func TestGrepProbeMatchRatio(t *testing.T) {
+	params := &ComponentParam{}
+	params.Init(NewBaseTable(SkipRemote(true)))
+	item := &params.FunctionCfg.GrepProbeMatchRatio
+	require.Equal(t, 0.05, item.GetAsFloat())
+	for _, value := range []string{"", "bad", "-0.1", "1.1", "NaN", "+Inf", "-Inf", "1e999"} {
+		require.NoError(t, params.Save(item.Key, value))
+		require.Equal(t, 0.05, item.GetAsFloat(), value)
+	}
+	for _, value := range []string{"0", "0.1", "1"} {
+		require.NoError(t, params.Save(item.Key, value))
+		require.Equal(t, value, item.GetValue())
 	}
 }

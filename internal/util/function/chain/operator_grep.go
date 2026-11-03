@@ -116,8 +116,9 @@ func NewGrepOpFromReprWithContext(repr *OperatorRepr, buildCtx types.FunctionBui
 		return nil, merr.Wrap(err, "prepare grep arguments")
 	}
 	executionLimits := native.ExecutionLimits{
-		BatchSize:      config.GrepBatchSize.GetAsInt64(),
-		MaxResultBytes: uint64(maxResultBytes),
+		BatchSize:       config.GrepBatchSize.GetAsInt64(),
+		ProbeMatchRatio: config.GrepProbeMatchRatio.GetAsFloat(),
+		MaxResultBytes:  uint64(maxResultBytes),
 	}
 	return &GrepOp{
 		BaseOp:  BaseOp{inputs: []string{types.SegOffsetFieldName}, outputs: append([]string(nil), repr.Outputs...)},

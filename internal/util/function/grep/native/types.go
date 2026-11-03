@@ -32,8 +32,9 @@ type CompileLimits struct {
 }
 
 type ExecutionLimits struct {
-	BatchSize      int64 // Candidate rows per read batch; independent of the matching limit.
-	MaxResultBytes uint64
+	BatchSize       int64 // Candidate rows per read batch; independent of the matching limit.
+	MaxResultBytes  uint64
+	ProbeMatchRatio float64 // Minimum matching-row fraction after the bounded probe; [0, 1].
 }
 
 // ScanRequest is call-local data. The caller snapshots all service limits and

@@ -1,7 +1,7 @@
 # Grep: QueryScan Execution and ripgrep Integration
 
 - **Created:** 2026-10-08
-- **Updated:** 2026-11-02
+- **Updated:** 2026-11-04
 - **Scope:** Current Grep implementation: matching engine, QueryScan execution,
   in-process Arrow transport and distributed computed results.
 - **Engine dependency:** ripgrep `15.2.0`, commit `e89fff89ac9af12e8d4ce9d5fd07beb408ca730f`
@@ -19,8 +19,8 @@ binds each segment; native code compiles one matcher and creates one session per
 segment call. GrepOp returns row selection and JSON details. The pipeline reads
 identities separately afterward. Each sealed native Grep call acquires its own
 read lease and captures its own snapshot. Candidate, identity and output reads
-do not share a request-owned snapshot object. The current runner reads candidate
-text directly; there is no additional Grep index-bitmap stage.
+do not share a request-owned snapshot object. Sealed segments may use NGRAM candidate bitmaps and bounded probing before
+reading text; see [Grep NGRAM acceleration](20261103-grep-ngram-index.md).
 
 `milvus-grep-core` is a local path dependency of `tantivy-binding`. The final Rust
 artifact remains `libtantivy_binding.a`, linked into `milvus_core`. The C++ Grep
@@ -75,14 +75,14 @@ input; values are never concatenated across records. C++ skips database NULLs
 and retains the mapping from batch positions to segment offsets.
 
 The request supplies an rg-style `arguments` string and a separate field name.
-Supported flags are repeated `-e`, `-F`, `-i`/`-s`, and `-w`/`-x`, including the
+Supported flags are repeated `-e`, `-F`, `-i`/`-s`, `-w`/`-x`, and `-m`, including the
 exact aliases in [the argument grammar](#51-argument-string-grammar-and-whitelist).
 Parsing and compilation happen on the execution node. The matcher performs no
 file traversal, external command execution, network access or terminal output.
 
 Matching is LF line-oriented. Matching details include line numbers and line
 start byte offsets within the field. Context, multiline, smart case, CRLF normalization,
-fragment-only output, per-field match limits,
+fragment-only output,
 inversion, counts, PCRE2, transcoding and replacement are unsupported. The
 parser rejects unlisted flags, including flags whose supplied value would make
 them a no-op. There is no fallback to a different matcher.
@@ -634,9 +634,10 @@ produces the following logical spec (field identity is resolved by GrepOp on Que
 | `-s` | `--case-sensitive` | Case-sensitive; also the default |
 | `-w` | `--word-regexp` | Word boundary mode |
 | `-x` | `--line-regexp` | Whole-line boundary mode |
+| `-m COUNT` | `--max-count COUNT` | Keep the first COUNT matching lines per field value; omitted means unlimited |
 
-Support attached `-ePATTERN` and `--regexp=PATTERN`. Short flags can be grouped
-(e.g. `-Fi`); `e` consumes the remainder of its token or the next token.
+Support attached `-ePATTERN`, `--regexp=PATTERN`, `-mCOUNT`, and `--max-count=COUNT`. Short flags can be grouped
+(e.g. `-Fi` or `-im2`); `e` and `m` consume the remainder of their token or the next token.
 The next token after a separated `-e` is always its value, even if it starts
 with `-`: `-e -C` searches for the pattern `-C`, not context. A missing next token
 is an error. Boolean flags take no values; `--ignore-case=false` is invalid.
@@ -645,6 +646,10 @@ Do not support abbreviated long names or unlisted negated aliases.
 Repeated `-e` appends patterns, including empty ones; `-e ""` is valid. Patterns
 are compiled as one ordered OR expression, not searched independently. Repeated
 `-F`, `-w`, or `-x` is idempotent. For `-i`/`-s`, the last occurrence wins.
+For repeated `-m`/`--max-count`, the last occurrence wins. COUNT is a decimal
+uint64 (0 through 18446744073709551615); negative, signed, fractional, empty,
+overflowing and non-decimal values are rejected. A missing value is a typed
+ParameterMissing error; a malformed value is ParameterInvalid.
 Combining `-w` and `-x` is an error, irrespective of order, rather than inheriting
 rg's precedence. `--` ends options, but all following positional tokens are
 rejected. A final bare `--` is allowed if a pattern was already supplied.
@@ -687,7 +692,7 @@ spec, err := grep.Parse(
 The byte limit is positive and supplied by the factory from
 `function.grep.maxArgumentBytes`; see [resource limits](#71-resource-limits)
 for defaults. `Spec` contains ordered patterns and
-matching enums, not field IDs, database metadata, native handles or a wire
+matching enums and an optional matching-line cap, not field IDs, database metadata, native handles or a wire
 representation. Its fields are private and only the parser populates them.
 Read-only accessors do not expose the backing pattern slice; the zero value is invalid.
 
@@ -699,11 +704,44 @@ checks request cancellation before and after construction. The parser does not
 translate C ABI statuses. Parsing success does not establish regex validity: `-e '['` produces a
 Spec, but native compilation rejects it before matching.
 
+#### Per-field matching-line cap (`-m` / `--max-count`)
+
+`-m M` is independent of Query limit/offset. Query limit counts matching records;
+`-m` keeps the first M matching LF-delimited lines of each field value. Every
+retained line includes all of its spans; multiple patterns or occurrences on
+one line still count as one line. Line numbers and byte offsets refer to the
+original field and are not renumbered after skipped lines. Counters reset for
+every input, including repeated segment offsets, and across native batches.
+Without `-m`, all matching lines are returned as before. Context and multiline
+options remain unsupported.
+
+The count is matching configuration, not a service resource budget. Rust stops
+before matching the next line once the cap is reached; retained output still
+has to fit the existing byte budget, and errors never become partial success.
+The memory-only API continues to validate all supplied input UTF-8 before any
+matching, including bytes beyond the matching-line cap, and cancellation remains
+observable. This cap does not promise to avoid UTF-8 validation or LOB reads
+already performed by the segment adapter.
+
+`-m 0` still parses and compiles the pattern, then the segment adapter returns
+a typed empty result without querying NGRAM or reading field values. It does
+not hide invalid regexes or an already-cancelled request. Positive `-m` values
+do not change NGRAM necessary conditions or the Probe matching-record ratio.
+Probe eligibility and sample size use Query's record limit, not the per-field
+matching-line cap.
+
+The raw `arguments` string already travels to the execution node, so no RPC
+proto change is needed. Go Spec, the Go/C++ scan options, and C++/Rust match
+options carry the count and its presence. The generated Rust C header and all
+native/Go consumers must be rebuilt together because this is a same-build ABI.
+
 ### 5.2 Normalized Spec and Input Contract
 
 The normalized matching options are `pattern_kind` (regex/literal), `case_mode`
-(sensitive/insensitive), and `boundary` (none/word/line). Zero initialization
-selects regex, case-sensitive, no boundary restriction. Reject unknown enum
+(sensitive/insensitive), `boundary` (none/word/line), and optional `max_count`.
+The in-process C ABIs represent presence separately as `has_max_count` (0/1),
+so explicit zero and unlimited remain distinct. Zero initialization selects
+regex, case-sensitive, no boundary or matching-line-count restriction. Reject unknown enum
 values when constructing the Go specification and at the Rust compile boundary.
 Word mode uses the pinned builder's
 Unicode word matching semantics; it is not a tokenizer or Chinese segmentation.
@@ -764,8 +802,9 @@ The Rust/C API has one output shape:
   is its zero-based UTF-8 byte offset, including preceding newline bytes.
   Count unmatched and empty lines too, and reset coordinates for each input.
   Do not duplicate matched text or return roles or field identifiers.
-- Success includes all matching lines and spans for every input in the batch.
-  The batch API has no first-hit early return or silent truncation. The C++
+- Success includes matching lines up to the explicit per-field `-m` cap,
+  with all spans on each retained line, for every input in the batch. Without
+  that cap all matching lines are retained; there is no silent budget truncation. The C++
   runner caps the number of inputs in each call by the remaining Query match
   quota, so it never needs to truncate a returned record. Resource failure,
   deadline and cancellation produce no Result.
@@ -909,11 +948,16 @@ failure propagates as `std::bad_alloc` to the existing cgo OOM handler.
 | function.grep.maxRegexBytes | Native regex compilation budget | 10485760 |
 | function.grep.maxDFACacheBytes | Native DFA cache budget | 8388608 |
 | function.grep.batchSize | Candidate rows per text read batch | 128 |
+| function.grep.probeMatchRatio | Matching-row ratio required to continue scanning after an eligible limit-aware NGRAM probe | 0.05 |
 | function.grep.maxScanRows | Candidate rows per segment; 0 is uncapped | 0 |
 | QuotaConfig.MaxOutputSize | Native matching-result byte budget; separately used for combined ordinary and computed output checks | Shared configuration |
 | Request context | Execution deadline and cancellation | Request-defined |
 
-The function settings are refreshable and fall back to defaults for invalid or out-of-range values. Operators and candidate plans read settings at their respective preparation boundaries. Read batch size is independent of remaining match quota. Native matching stops at input exhaustion or its record cap. See [function_param.go](../../../pkg/util/paramtable/function_param.go), [operator_grep.go](../../../internal/util/function/chain/operator_grep.go) and [SegmentGrep.cpp](../../../internal/core/src/grep/SegmentGrep.cpp).
+The function settings are refreshable and fall back to defaults for invalid or out-of-range values. Operators and candidate plans read settings at their respective preparation boundaries. Ordinary scan/index read batches are independent of remaining match quota; Probe may use smaller reads bounded by that quota. Native matching stops at input exhaustion or its record cap. See [function_param.go](../../../pkg/util/paramtable/function_param.go), [operator_grep.go](../../../internal/util/function/chain/operator_grep.go) and [SegmentGrep.cpp](../../../internal/core/src/grep/SegmentGrep.cpp).
+
+The NGRAM-specific eligibility rules, limit-aware probe sampling, match-ratio
+configuration and candidate ownership are maintained in the
+[Grep NGRAM index design](20261103-grep-ngram-index.md#6-segment-routing-and-execution).
 
 The final QueryNode output size check sums the protobuf sizes of both FieldsData
 and ComputedResults against the same MaxOutputSize limit. Computed values also
@@ -942,7 +986,8 @@ between calls when the Query match cap is reached; it never turns a budget or
 execution failure into partial success. Resource exhaustion,
 invalid input and cancellation discard that call's output and return
 `*out_result=NULL`. No details are silently truncated to fit a budget. Success
-returns all matching lines and spans for every input field in that batch. If a
+returns matching lines up to the requested per-field `-m` cap and all spans
+on each retained line, for every input field in that batch. If a
 later batch fails, the caller fails the request rather than publishing earlier batches as a
 complete success. Soft detail truncation is unsupported.
 
@@ -1127,9 +1172,11 @@ internal/core/output/unittest/all_tests --gtest_filter='Grep.*:GrepFault.*:*Grep
 
 ### Acceptance Cases
 
-The following matrix is for phase one. Context, multiline, fragments, counts,
-and per-field match limits are not enabled by these tests and need separate
-acceptance contracts when implemented.
+The original matrix below covers phase one. Context, multiline, fragments and
+count-only output remain unsupported. Per-field `-m` coverage additionally
+checks numeric syntax/presence, repeated flags, zero/unlimited, per-record and
+per-batch reset, full spans and coordinates, Query record limits, NGRAM/probe
+paths, unreadable LOB avoidance for zero, and failure/cancellation preservation.
 
 | Area | Required cases |
 |---|---|
@@ -1260,6 +1307,33 @@ Raw local artifacts for this run were
 `/tmp/grep-json-history-replay-7dba39ni/report.json`; they are not repository
 fixtures. The table above preserves the comparison independently of those
 local files. No multi-process cluster performance claim is made.
+
+### Per-field max-count verification (2026-11-04)
+
+- Pure-Go parser tests passed with `-tags dynamic,test -gcflags="all=-N -l"`.
+- Rust core: 59 unit tests and one documentation test passed; generated C header
+  layouts are checked by both Rust and real C11/C++17 calls against the integrated
+  Tantivy archive (nine exported symbols). The header was regenerated by cbindgen.
+- Targeted segment/NGRAM tests: 95 passed, 45 inapplicable growing/type parameter
+  cases skipped. These include repeated offsets, independent Query limits,
+  indexed/raw matching, and `-m 0` avoiding a deliberately unreadable LOB and
+  failing index reader while still rejecting an invalid pattern/cancelled request.
+- The real Go-to-C++ adapter test passed for both VARCHAR and TEXT using an
+  isolated local data root. Its binary was built with the required Go test tags
+  and optimization/inlining disabled.
+- Public SDK/RPC: 216 successful oracle comparisons and 36 expected-error cases
+  passed across VARCHAR/TEXT, growing/sealed/NGRAM, count aliases, zero, repeated
+  flags, max uint64, multiple patterns, empty patterns, UTF-8/CRLF coordinates,
+  Query limit and offset. Actual NGRAM files were verified for both collections.
+  Go numeric errors retain 1100/1101; malformed regexes retain the existing
+  segcore 2042 code, including with `-m 0`. All are marked as input errors.
+- Whitespace/gofumpt and Segcore error-boundary checks passed. No RPC schema,
+  persisted index format, or error-code projection was changed. No performance
+  speedup is claimed by this correctness run.
+
+Evidence: `/tmp/grep-max-count-e2e-q5nn27kt/verification.json`, `e2e-report.json`,
+`native.xml`, `go-adapter.log`; standalone Rust and ABI logs are
+`/tmp/grep-max-count-rust.log` and `/tmp/grep-max-count-abi.log`.
 
 ## 12. Remaining Validation Questions
 

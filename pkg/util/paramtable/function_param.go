@@ -17,6 +17,7 @@
 package paramtable
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ type functionConfig struct {
 	GrepMaxRegexBytes             ParamItem  `refreshable:"true"`
 	GrepMaxDFACacheBytes          ParamItem  `refreshable:"true"`
 	GrepBatchSize                 ParamItem  `refreshable:"true"`
+	GrepProbeMatchRatio           ParamItem  `refreshable:"true"`
 	GrepMaxScanRows               ParamItem  `refreshable:"true"`
 	BatchFactor                   ParamItem  `refreshable:"true"`
 	ModelRequestTimeout           ParamItem  `refreshable:"true"`
@@ -137,6 +139,22 @@ func (p *functionConfig) init(base *BaseTable) {
 		},
 	}
 	p.GrepBatchSize.Init(base.mgr)
+
+	p.GrepProbeMatchRatio = ParamItem{
+		Key:          "function.grep.probeMatchRatio",
+		Version:      "3.1.0",
+		DefaultValue: "0.05",
+		Export:       true,
+		Doc:          "Minimum matching-row ratio to continue scanning after a limit-aware Grep probe (32 to 256 input rows) on eligible small-limit NGRAM queries. Range [0, 1]; 0 always continues scanning after the probe, 1 requires every sampled row to match. Invalid values fall back to 0.05. Changes apply to newly prepared operators.",
+		Formatter: func(value string) string {
+			parsed, err := strconv.ParseFloat(value, 64)
+			if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 || parsed > 1 {
+				return p.GrepProbeMatchRatio.DefaultValue
+			}
+			return value
+		},
+	}
+	p.GrepProbeMatchRatio.Init(base.mgr)
 
 	p.GrepMaxScanRows = ParamItem{
 		Key:          "function.grep.maxScanRows",
