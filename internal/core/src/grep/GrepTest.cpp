@@ -14,6 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "grep/Grep.h"
+#include "grep/GrepResult.h"
 
 #include <future>
 #include <string>
@@ -21,6 +22,7 @@
 #include <utility>
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 namespace milvus::grep {
 namespace {
@@ -46,6 +48,62 @@ ExpectError(Fn&& fn, Status status, Operation operation) {
         EXPECT_EQ(error.status(), status);
         EXPECT_EQ(error.operation(), operation);
         EXPECT_NE(error.what()[0], '\0');
+    }
+}
+
+TEST(Grep, DetailsViewSerializesSelectedInputAndOwnsJSON) {
+    static_assert(!std::is_constructible_v<GrepDetailsView, Result&&, size_t>);
+    const auto json = [] {
+        MatchOptions options;
+        options.before_context = 1;
+        auto session = Compile("error", options).CreateSession();
+        auto native =
+            session.ExecuteBatch({"error", "前\nerror error\n"}, Budget());
+        const GrepResult result{GrepDetailsView{native, 1}};
+        return result.ToJson();
+    }();
+    // JSON must own the copied text after both native Result and Session die.
+    EXPECT_EQ(json, nlohmann::json::parse(R"({"items":[
+        {"type":"context","text":"前\n","line_number":1,"absolute_offset":0,"starts":[],"ends":[]},
+        {"type":"match","text":"error error\n","line_number":2,"absolute_offset":4,"starts":[0,6],"ends":[5,11]}
+    ]})"));
+}
+
+TEST(Grep, CountAndExistenceUseTheUnifiedJSONInterface) {
+    const GrepResult lines{GrepCount{3, GrepCountUnit::MatchingLines, true}};
+    EXPECT_EQ(lines.ToJson(),
+              nlohmann::json::parse(
+                  R"({"count":3,"unit":"matching_lines","complete":true})"));
+    const GrepResult matches{GrepCount{5, GrepCountUnit::Matches, false}};
+    EXPECT_EQ(matches.ToJson(),
+              nlohmann::json::parse(
+                  R"({"count":5,"unit":"matches","complete":false})"));
+    const GrepResult exists{GrepExists{}};
+    EXPECT_EQ(exists.ToJson().dump(), "{}");
+}
+
+TEST(Grep, SummaryModesExposeSelectionWithoutLines) {
+    for (const auto mode : {ResultMode::Count, ResultMode::Exists}) {
+        MatchOptions options;
+        options.result_mode = mode;
+        options.before_context = options.after_context = 100;
+        auto session = Compile("error", options).CreateSession();
+        auto result = session.ExecuteBatch(
+            {"skip", "error error\nmiss\nerror", ""}, Budget());
+        EXPECT_FALSE(result.Selected(0));
+        EXPECT_TRUE(result.Selected(1));
+        EXPECT_FALSE(result.Selected(2));
+        EXPECT_EQ(result.LineCount(1), 0);
+        EXPECT_EQ(result.MatchingLineCount(1),
+                  mode == ResultMode::Count ? 2 : 1);
+        EXPECT_EQ(result.CountComplete(1), mode == ResultMode::Count);
+        options.max_count = 1;
+        auto capped = Compile("error", options)
+                          .CreateSession()
+                          .ExecuteBatch({"error\nerror"}, Budget());
+        EXPECT_TRUE(capped.Selected(0));
+        EXPECT_EQ(capped.MatchingLineCount(0), 1);
+        EXPECT_FALSE(capped.CountComplete(0));
     }
 }
 
@@ -92,7 +150,7 @@ TEST(Grep, BatchResultsAndByteSpans) {
         {"ok", "error: error\r\nnext", "错误：error", ""}, Budget());
     EXPECT_FALSE(result.Selected(0));
     ASSERT_EQ(result.LineCount(1), 1);
-    EXPECT_EQ(result.Content(1, 0), "error: error\r");
+    EXPECT_EQ(result.Content(1, 0), "error: error\r\n");
     ASSERT_EQ(result.SpanCount(1, 0), 2);
     EXPECT_EQ(result.GetSpan(1, 0, 0).start, 0);
     EXPECT_EQ(result.GetSpan(1, 0, 0).end, 5);
@@ -162,7 +220,7 @@ TEST(Grep, EmptyLinesNulAndBomArePreserved) {
         session.ExecuteBatch({"", "\n", "é", binary, "\xef\xbb\xbf"}, Budget());
     EXPECT_FALSE(result.Selected(0));
     ASSERT_EQ(result.LineCount(1), 1);
-    EXPECT_TRUE(result.Content(1, 0).empty());
+    EXPECT_EQ(result.Content(1, 0), "\n");
     EXPECT_EQ(result.GetSpan(1, 0, 0).end, 0);
     ASSERT_EQ(result.SpanCount(2, 0), 3);
     EXPECT_EQ(result.GetSpan(2, 0, 1).start, 1);
@@ -211,7 +269,7 @@ TEST(Grep, AbsoluteAnchorSpansAreLineLocal) {
     auto result = session.ExecuteBatch({"prefix\nerror\nlast\n"}, Budget());
     EXPECT_TRUE(result.Selected(0));
     ASSERT_EQ(result.LineCount(0), 1);
-    EXPECT_EQ(result.Content(0, 0), "error");
+    EXPECT_EQ(result.Content(0, 0), "error\n");
     ASSERT_EQ(result.SpanCount(0, 0), 1);
     EXPECT_EQ(result.GetSpan(0, 0, 0).start, 0);
     EXPECT_EQ(result.GetSpan(0, 0, 0).end, 5);
